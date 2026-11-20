@@ -1,0 +1,31 @@
+# 模型文件（单独下载放置到 models/ 目录）
+models/*
+!models/README.md
+
+# 打包后的免安装运行环境与二进制库（放在 GitHub Releases）
+internal/
+*.exe
+core/server/engines/llama/bin/*.dll
+
+# 个人录音与日记记录
+20[0-9][0-9]/
+
+# 运行日志与临时文件
+logs/
+*.log
+*.bak
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 构建与发布压缩包
+build/
+dist/
+release/
+*.zip
+
+# 编辑器配置
+.vscode/
+.idea/
