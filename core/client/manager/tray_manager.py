@@ -75,6 +75,15 @@ class TrayManager:
             ),
         ]
 
+        threshold_menu = [
+            (
+                f'{sec:g} 秒' + (' (推荐)' if sec == 0.8 else ''),
+                lambda icon=None, item=None, s=sec: self._set_threshold(s),
+                {'checked': lambda _, s=sec: abs(getattr(Config, 'threshold', 0.8) - s) < 0.05},
+            )
+            for sec in (0.3, 0.5, 0.8, 1.0, 1.2, 1.5)
+        ]
+
         diary_submenu = [
             ('📂 打开当月日记与录音目录', self._open_diary),
             ('⏳ 自动清理保留天数', retention_menu),
@@ -84,6 +93,7 @@ class TrayManager:
         client_menu = [
             ('📋 复制结果', self._copy_last_result),
             ('📁 日记与录音', diary_submenu),
+            ('⏱️ 长按触发延时', threshold_menu),
             ('📝 上下文', self._add_context),
             ('✨ 热词', self._add_hotword),
             ('🧹 清除记忆 (AI对话上下文)', self._clear_memory),
@@ -128,6 +138,8 @@ class TrayManager:
                     'get_retention_days': lambda: getattr(Config, 'auto_clean_days', 3),
                     'set_retention_days': self._set_retention_days,
                 },
+                'get_threshold': lambda: getattr(Config, 'threshold', 0.8),
+                'set_threshold': self._set_threshold,
             },
         }
         if server is not None:
@@ -183,26 +195,42 @@ class TrayManager:
         bg = "#162032" if theme != 'error' else "#5b1924"
         toast(message, duration=int(duration * 1000), bg=bg)
 
+    def _persist_client_config(self, key: str, value_str: str) -> None:
+        """将数值型配置项持久化写回 config_client.py"""
+        try:
+            cfg_path = os.path.join(self.app.base_dir, 'config_client.py')
+            if not os.path.exists(cfg_path):
+                return
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            new_content, count = re.subn(
+                rf'(^\s*{re.escape(key)}\s*=\s*)[0-9.]+',
+                rf'\g<1>{value_str}',
+                content,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            if count > 0 and new_content != content:
+                with open(cfg_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+        except Exception as e:
+            logger.warning(f"保存 {key} 到配置文件失败: {e}")
+
+    def _set_threshold(self, seconds: float):
+        """设置长按触发语音识别与弹框的延时（秒），立即生效并持久化写入 config_client.py"""
+        val = round(float(seconds), 2)
+        Config.threshold = val
+        shortcut_mgr = getattr(self.app, 'shortcut', None)
+        if shortcut_mgr and hasattr(shortcut_mgr, 'tasks'):
+            for task in shortcut_mgr.tasks.values():
+                task.threshold = task.shortcut.get_threshold(val)
+        self._persist_client_config('threshold', f'{val:g}')
+        self._notify(f"已设为按住 {val:g} 秒后弹出语音框并识别", theme='done')
+
     def _set_retention_days(self, days: int):
         """设置录音与日记保留天数，并持久化写入 config_client.py"""
         Config.auto_clean_days = days
-        try:
-            cfg_path = os.path.join(self.app.base_dir, 'config_client.py')
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                new_content, count = re.subn(
-                    r'(^\s*auto_clean_days\s*=\s*)\d+',
-                    rf'\g<1>{days}',
-                    content,
-                    count=1,
-                    flags=re.MULTILINE,
-                )
-                if count > 0 and new_content != content:
-                    with open(cfg_path, 'w', encoding='utf-8') as f:
-                        f.write(new_content)
-        except Exception as e:
-            logger.warning(f"保存 auto_clean_days 到配置文件失败: {e}")
+        self._persist_client_config('auto_clean_days', str(days))
 
         if days > 0:
             deleted = self.app.diary.clean_expired(days)

@@ -25,8 +25,16 @@ def _format_shortcut_name(key: str) -> str:
         key: 快捷键名称（如 'caps_lock', 'f12'）
 
     Returns:
-        str: 格式化后的名称（如 'CapsLock', 'F12'）
+        str: 格式化后的名称（如 'Caps Lock (大写锁定键)', 'F12'）
     """
+    friendly_map = {
+        'caps_lock': 'Caps Lock (大写锁定键)',
+        'x1': '鼠标后侧键 (X1)',
+        'x2': '鼠标前侧键 (X2)',
+    }
+    norm = key.lower().strip()
+    if norm in friendly_map:
+        return friendly_map[norm]
     # 将下划线替换为空格，然后标题化
     return key.replace('_', ' ').title()
 

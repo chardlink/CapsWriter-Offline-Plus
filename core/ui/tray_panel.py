@@ -254,6 +254,15 @@ RETENTION_CHOICES = [
     (0, '永久'),
 ]
 
+THRESHOLD_CHOICES = [
+    (0.3, '0.3秒'),
+    (0.5, '0.5秒'),
+    (0.8, '0.8秒'),
+    (1.0, '1.0秒'),
+    (1.2, '1.2秒'),
+    (1.5, '1.5秒'),
+]
+
 
 def _clamp(v, lo=0.0, hi=1.0):
     return lo if v < lo else hi if v > hi else v
@@ -404,6 +413,11 @@ def _make_vector_icon(name: str, size_px: int, color: Tuple[int, int, int]) -> I
             (13.5 * u, 2.5 * u), (5.5 * u, 13.2 * u), (11.5 * u, 13.2 * u),
             (10.2 * u, 21.5 * u), (18.5 * u, 10.8 * u), (12.5 * u, 10.8 * u),
         ], fill=col)
+    elif name == 'timer':
+        d.ellipse((4.5 * u, 5.5 * u, 19.5 * u, 20.5 * u), outline=col, width=lw)
+        d.line([(9.5 * u, 2.8 * u), (14.5 * u, 2.8 * u)], fill=col, width=lw)
+        d.line([(12 * u, 9 * u), (12 * u, 13.2 * u)], fill=col, width=lw)
+        d.line([(12 * u, 13.2 * u), (15.2 * u, 15.2 * u)], fill=col, width=lw)
     elif name == 'power':
         d.arc((5 * u, 5.5 * u, 19 * u, 19.5 * u), -55, 235, fill=col, width=lw)
         d.line([(12 * u, 3.2 * u), (12 * u, 11.5 * u)], fill=col, width=lw)
@@ -521,6 +535,7 @@ class TrayPanel:
         self._switch_at = 0.0
 
         self._selected_days = self._read_retention_days()
+        self._selected_threshold = self._read_threshold()
         self._console_visible = self._read_console_visible()
 
         self._icon_cache: Dict[Tuple, Image.Image] = {}
@@ -579,12 +594,21 @@ class TrayPanel:
         except Exception:
             return 3
 
+    def _read_threshold(self) -> float:
+        client_cfg = self.config.get('client') or {}
+        fn = client_cfg.get('get_threshold')
+        try:
+            return round(float(fn()), 2) if fn else 0.8
+        except Exception:
+            return 0.8
+
     def _sync_live_state(self) -> None:
         self._autostart_val = self._read_autostart()
         self._switch_pos = 1.0 if self._autostart_val else 0.0
         self._switch_from = self._switch_pos
         self._switch_at = 0.0
         self._selected_days = self._read_retention_days()
+        self._selected_threshold = self._read_threshold()
         self._console_visible = self._read_console_visible()
 
     # ---- 布局几何与资源缓存 ----
@@ -612,9 +636,9 @@ class TrayPanel:
         self.header_h = int(round(34 * s))
         self.tab_h = int(round(34 * s)) if self._has_tabs else 0
         if self._has_tabs:
-            self.content_h = int(round(220 * s))
+            self.content_h = int(round(296 * s))
         elif self._has_client:
-            self.content_h = int(round(220 * s))
+            self.content_h = int(round(296 * s))
         else:
             rows = len((self.config.get('server') or {}).get('actions', []))
             self.content_h = int(round(68 * s + 10 * s + rows * 42 * s + max(0, rows - 1) * 8 * s))
@@ -1020,6 +1044,14 @@ class TrayPanel:
             if action:
                 threading.Thread(target=action, args=(days,), daemon=True).start()
             return
+        if hit_id.startswith('thr_'):
+            val = round(float(hit_id[4:]), 2)
+            self._selected_threshold = val
+            self._need_redraw = True
+            self._present(now)
+            if action:
+                threading.Thread(target=action, args=(val,), daemon=True).start()
+            return
         if hit_id == 'toggle_console':
             self._console_visible = not self._console_visible
             self._need_redraw = True
@@ -1293,25 +1325,68 @@ class TrayPanel:
         d.text((rx0, label_y), '自动清理保留天数', font=self.f_small, fill=TEXT_MUTED + (255,), anchor='lm')
 
         # 底部一排 6 个天数选择胶囊
-        py0 = dy + int(round(58 * s))
-        ph = int(round(27 * s))
-        pgap = int(round(5 * s))
-        pw_total = rw - pgap * (len(RETENTION_CHOICES) - 1)
-        pw = pw_total // len(RETENTION_CHOICES)
-        p_cy = py0 + ph // 2
-        set_ret = diary.get('set_retention_days')
+        self._render_pill_row(
+            frame, d, hits, rx0, dy + int(round(58 * s)), rw, int(round(27 * s)),
+            RETENTION_CHOICES, 'ret_', self._selected_days, diary.get('set_retention_days'),
+        )
 
-        for idx, (days_val, dlabel) in enumerate(RETENTION_CHOICES):
-            px0 = rx0 + idx * (pw + pgap)
-            px1 = px0 + pw if idx < len(RETENTION_CHOICES) - 1 else (rx0 + rw)
-            prect = (px0, py0, px1, py0 + ph)
-            hid = f'ret_{days_val}'
-            active = self._selected_days == days_val
-            self._draw_tile(frame, hid, prect, ph / 2, selected=active)
+        # 长按触发延时子卡片
+        ty0 = dy + dh + int(round(8 * s))
+        th = int(round(68 * s))
+        tcard = _draw_rr(
+            (cw, th), 12 * s, fill=(255, 255, 255, 11), outline=(255, 255, 255, 24), width=1
+        )
+        frame.alpha_composite(tcard, (x0, ty0))
+
+        t_cy = ty0 + int(round(19 * s))
+        frame.alpha_composite(self._icon('timer', f_ico_sz, ACCENT_C1), (rx0, t_cy - f_ico_sz // 2))
+        d.text(
+            (rx0 + f_ico_sz + int(round(6 * s)), t_cy),
+            '长按触发延时', font=self.f_sub, fill=TEXT_PRIMARY + (255,), anchor='lm',
+        )
+        d.text(
+            (x0 + cw - pad_in, t_cy),
+            '按住超此时长才弹框', font=self.f_small, fill=TEXT_MUTED + (255,), anchor='rm',
+        )
+
+        self._render_pill_row(
+            frame, d, hits, rx0, ty0 + int(round(34 * s)), rw, int(round(26 * s)),
+            THRESHOLD_CHOICES, 'thr_', getattr(self, '_selected_threshold', 0.8),
+            client_cfg.get('set_threshold'), tol=0.05,
+        )
+
+    def _render_pill_row(
+        self,
+        frame: Image.Image,
+        d: ImageDraw.Draw,
+        hits: list,
+        x0: int,
+        y0: int,
+        width: int,
+        height: int,
+        choices: list,
+        prefix: str,
+        selected_val,
+        on_select: Optional[Callable],
+        tol: float = 0.0,
+    ) -> None:
+        """绘制均分一排的胶囊单选按钮组"""
+        pgap = int(round(5 * self.s))
+        pw_total = width - pgap * (len(choices) - 1)
+        pw = pw_total // len(choices)
+        p_cy = y0 + height // 2
+
+        for idx, (val, label) in enumerate(choices):
+            px0 = x0 + idx * (pw + pgap)
+            px1 = px0 + pw if idx < len(choices) - 1 else (x0 + width)
+            prect = (px0, y0, px1, y0 + height)
+            hid = f'{prefix}{val}'
+            active = (abs(float(selected_val) - float(val)) < tol) if tol > 0 else (selected_val == val)
+            self._draw_tile(frame, hid, prect, height / 2, selected=active)
             font = self.f_small_bold if active else self.f_small
             tcol = (255, 255, 255) if active else (TEXT_PRIMARY if self._hover_id == hid else TEXT_SECONDARY)
-            d.text(((px0 + px1) // 2, p_cy), dlabel, font=font, fill=tcol + (255,), anchor='mm')
-            hits.append((hid, prect, set_ret, False))
+            d.text(((px0 + px1) // 2, p_cy), label, font=font, fill=tcol + (255,), anchor='mm')
+            hits.append((hid, prect, on_select, False))
 
     def _render_server_tab(self, frame: Image.Image, d: ImageDraw.Draw, x0: int, y: int, cw: int, now: float, hits: list) -> None:
         s = self.s
