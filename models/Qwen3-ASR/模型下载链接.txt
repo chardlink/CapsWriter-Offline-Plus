@@ -1,2 +1,5 @@
-所有模型请前往此处下载：
+﻿所有模型请前往本仓库 Releases 下载（独立云端备份）：
+https://github.com/chardlink/CapsWriter-Offline-Plus/releases/tag/models
+
+原项目备用镜像：
 https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models

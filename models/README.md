@@ -4,7 +4,8 @@
 
 ## 下载地址
 
-- 原项目模型发布页：<https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models>
+- **本仓库独立模型备份**：<https://github.com/chardlink/CapsWriter-Offline-Plus/releases/tag/models>
+- **原项目模型发布页（备用）**：<https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models>
 
 ## 目录结构示例
 

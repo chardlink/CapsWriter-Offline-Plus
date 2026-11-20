@@ -41,8 +41,9 @@ class ServerConfig:
 
 class ModelDownloadLinks:
     """模型下载链接配置"""
-    # 统一导向 GitHub Release 模型页面
-    models_page = "https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models"
+    # 优先导向本仓库独立备份的 Models Release（也可从上游 HaujetZhao/CapsWriter-Offline 下载）
+    models_page = "https://github.com/chardlink/CapsWriter-Offline-Plus/releases/tag/models"
+    upstream_models_page = "https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models"
 
 
 class ModelPaths:

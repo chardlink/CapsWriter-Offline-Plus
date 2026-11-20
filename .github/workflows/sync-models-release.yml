@@ -1,0 +1,118 @@
+name: Sync Speech Models to Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/sync-models-release.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  sync-models:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      UPSTREAM_REPO: HaujetZhao/CapsWriter-Offline
+
+    steps:
+      - name: Ensure models release exists
+        run: |
+          cat <<'EOF' > /tmp/models_notes.md
+          离线语音识别与标点模型压缩包集合（本仓库独立云端备份），适用于 **CapsWriter-Offline-Plus v1.0**。
+
+          ## 模型选择
+
+          | 引擎名 | 准确性 | 速度 | 格式 | 调用方式 | 显卡加速 |
+          |------|-------|------|------|---------|---------|
+          | Paraformer | ★★★☆☆ | ★★★★★ | ONNX | sherpa_onnx | ❌ |
+          | SenseVoice-Small | ★★★☆☆ | ★★★★★ | ONNX | 自定义引擎 | ✅ |
+          | Fun-ASR-Nano | ★★★★☆ | ★★★★☆ | ONNX + GGUF | 自定义引擎 | ✅ |
+          | Qwen3-ASR-1.7B | ★★★★★ | ★★★☆☆ | ONNX + GGUF | 自定义引擎 | ✅ |
+
+          模型选择建议：
+          - 独显电脑优先用 `Qwen3-ASR-1.7B-q5_k`（`config_server.py` 默认配置），准确率最高
+          - 集显电脑可尝试 `Qwen3-ASR-1.7B-q4_k`，如果延迟偏高可改用 `Fun-ASR-Nano-GGUF`
+          - 低配/核显旧电脑建议 `Sensevoice-Small-ONNX`
+
+          ## 使用方法
+
+          下载后解压到项目根目录的 `models/` 下对应引擎目录内，例如：
+          - `Qwen3-ASR-1.7B-q5_k.zip` → 解压放入 `models/Qwen3-ASR/`
+          - `Fun-ASR-Nano-GGUF.zip` → 解压放入 `models/Fun-ASR-Nano/`
+          - `Sensevoice-Small-ONNX.zip` → 解压放入 `models/SenseVoice-Small/`
+          - `Qwen3-ForcedAligner-0.6B.zip` → 解压放入 `models/Qwen3-ForcedAligner/`
+
+          > 模型权重同步备份自原开源项目 [HaujetZhao/CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models)。
+          EOF
+
+          if ! gh release view models --repo "$REPO" >/dev/null 2>&1; then
+            gh release create models \
+              --repo "$REPO" \
+              --target "${{ github.sha }}" \
+              --title "Models (离线语音识别模型全集)" \
+              --notes-file /tmp/models_notes.md
+          else
+            gh release edit models \
+              --repo "$REPO" \
+              --title "Models (离线语音识别模型全集)" \
+              --notes-file /tmp/models_notes.md
+          fi
+
+      - name: Stream model archives from upstream to this release
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import urllib.request
+
+          repo = os.environ["REPO"]
+          upstream = os.environ["UPSTREAM_REPO"]
+          token = os.environ["GH_TOKEN"]
+
+          def fetch_json(url, auth=False):
+              req = urllib.request.Request(url)
+              req.add_header("Accept", "application/vnd.github+json")
+              req.add_header("User-Agent", "CapsWriter-Offline-Plus-ModelSync")
+              if auth:
+                  req.add_header("Authorization", f"Bearer {token}")
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.loads(resp.read().decode("utf-8"))
+
+          upstream_rel = fetch_json(f"https://api.github.com/repos/{upstream}/releases/tags/models")
+          target_rel = fetch_json(f"https://api.github.com/repos/{repo}/releases/tags/models", auth=True)
+          existing = {a["name"]: a["size"] for a in target_rel.get("assets", [])}
+
+          assets = upstream_rel.get("assets", [])
+          print(f"Found {len(assets)} upstream assets.")
+
+          for asset in assets:
+              name = asset["name"]
+              size = asset["size"]
+              url = asset["browser_download_url"]
+              if existing.get(name) == size:
+                  print(f"[SKIP] {name} ({size / 1048576:.1f} MB) already synced.")
+                  continue
+
+              print(f"[SYNC] Downloading {name} ({size / 1048576:.1f} MB)...")
+              subprocess.run(
+                  ["curl", "-fL", "--retry", "3", "--retry-delay", "3", "-sS", "-o", name, url],
+                  check=True,
+              )
+              got = os.path.getsize(name)
+              if got != size:
+                  raise RuntimeError(f"Size mismatch for {name}: expected {size}, got {got}")
+
+              print(f"[UPLOAD] Uploading {name} to {repo} release 'models'...")
+              subprocess.run(
+                  ["gh", "release", "upload", "models", name, "--repo", repo, "--clobber"],
+                  check=True,
+              )
+              os.remove(name)
+              print(f"[DONE] {name} synced and temp file cleaned.")
+          PY
