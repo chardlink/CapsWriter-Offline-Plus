@@ -27,6 +27,9 @@ from . import logger
 # 音频文件句柄类型
 AudioWriter = Union[Popen, wave.Wave_write]
 
+# 缓存 FFmpeg 检测结果，避免每次开始录音重复扫描 PATH
+_HAS_FFMPEG = shutil.which('ffmpeg') is not None
+
 
 class AudioFileManager:
     """
@@ -46,7 +49,7 @@ class AudioFileManager:
         self.file_path: Optional[Path] = None
         self.file_handle: Optional[AudioWriter] = None
         self.channels: int = 1
-        self._has_ffmpeg = shutil.which('ffmpeg') is not None
+        self._has_ffmpeg = _HAS_FFMPEG
         
         if self._has_ffmpeg:
             logger.debug("检测到 FFmpeg，将使用 MP3 格式保存录音")

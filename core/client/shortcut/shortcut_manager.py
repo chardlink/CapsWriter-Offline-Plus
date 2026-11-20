@@ -9,6 +9,7 @@
 4. hold_mode 和 click_mode 支持
 """
 from __future__ import annotations
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -34,8 +35,12 @@ class ShortcutManager:
     快捷键管理器
 
     统一管理多个快捷键，使用 pynput 监听键盘和鼠标事件。
-    所有事件处理都在 win32_event_filter 中完成，确保高性能和低延迟。
+    底层钩子中仅执行轻量判定与事件阻塞，将耗时任务派发至独立串行执行器。
     """
+
+    # 鼠标侧键防微动抖动窗口（秒）与长按结束后的回弹冷却期（秒）
+    MOUSE_BOUNCE_GRACE_S = 0.18
+    MOUSE_POST_FINISH_COOLDOWN_S = 0.35
 
     def __init__(self, app: CapsWriterClient, shortcuts: List[Shortcut]):
         """
@@ -55,8 +60,16 @@ class ShortcutManager:
         # 快捷键任务映射（key -> ShortcutTask）
         self.tasks: Dict[str, ShortcutTask] = {}
 
-        # 线程池
+        # 线程池（用于补发按键、单机倒计时、恢复状态等）
         self._pool = ThreadPoolExecutor(max_workers=4)
+
+        # 串行动作执行器（使按下/松开逻辑按顺序在后台运行，不阻塞系统钩子）
+        self._action_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ShortcutAction')
+
+        # 鼠标侧键防抖与防回弹状态
+        self._mouse_lock = threading.Lock()
+        self._mouse_release_timers: Dict[str, threading.Timer] = {}
+        self._mouse_cooldown_until: Dict[str, float] = {}
 
         # 按键模拟器
         self._emulator = ShortcutEmulator()
@@ -91,6 +104,13 @@ class ShortcutManager:
 
     # ========== 监听器创建 ==========
 
+    def _submit_action(self, fn, *args) -> None:
+        """在串行动作执行器中提交任务，避免钩子与关闭流程发生竞态异常"""
+        try:
+            self._action_executor.submit(fn, *args)
+        except RuntimeError:
+            pass
+
     def create_keyboard_filter(self):
         """创建键盘事件过滤器"""
         def win32_event_filter(msg, data):
@@ -112,13 +132,13 @@ class ShortcutManager:
 
             task = self.tasks[key_name]
 
-            # 处理按键事件
+            # 仅投递到串行执行器，避免阻塞 WH_KEYBOARD_LL 钩子
             if msg in KEY_DOWN_MESSAGES:
-                self._event_handler.handle_keydown(key_name, task)
+                self._submit_action(self._event_handler.handle_keydown, key_name, task)
             elif msg in KEY_UP_MESSAGES:
-                self._event_handler.handle_keyup(key_name, task)
+                self._submit_action(self._event_handler.handle_keyup, key_name, task)
 
-            # 阻塞事件
+            # 阻塞事件（suppress_event 会抛出 SuppressException，须置于投递之后）
             if task.shortcut.suppress and self.keyboard_listener:
                 self.keyboard_listener.suppress_event()
 
@@ -147,13 +167,13 @@ class ShortcutManager:
 
             task = self.tasks[button_name]
 
-            # 处理鼠标事件
+            # 仅在钩子中执行轻量防抖判断与派发，避免阻塞 WH_MOUSE_LL
             if msg == WM_XBUTTONDOWN:
-                self._event_handler.handle_keydown(button_name, task)
+                self._on_mouse_keydown(button_name, task)
             elif msg == WM_XBUTTONUP:
-                self._handle_mouse_keyup(button_name, task)
+                self._on_mouse_keyup(button_name, task)
 
-            # 阻塞事件
+            # 阻塞事件（suppress_event 会抛出 SuppressException，须置于派发之后）
             if task.shortcut.suppress and self.mouse_listener:
                 self.mouse_listener.suppress_event()
 
@@ -161,29 +181,92 @@ class ShortcutManager:
 
         return win32_event_filter
 
-    def _handle_mouse_keyup(self, button_name: str, task) -> None:
-        """处理鼠标按键释放事件"""
-        # 单击模式
-        if not task.shortcut.hold_mode:
-            if task.pressed:
-                task.pressed = False
-                task.released = True
-                task.event.set()
+    def _cancel_mouse_release_timer_locked(self, button_name: str) -> bool:
+        """在持锁状态下取消挂起的鼠标松开防抖定时器"""
+        timer = self._mouse_release_timers.pop(button_name, None)
+        if timer is not None:
+            timer.cancel()
+            return True
+        return False
+
+    def _on_mouse_keydown(self, button_name: str, task) -> None:
+        """在钩子层快速处理鼠标按下：拦截松开后回弹、取消瞬断释放并异步启动"""
+        now = time.time()
+        with self._mouse_lock:
+            cancelled_pending = self._cancel_mouse_release_timer_locked(button_name)
+            in_cooldown = now < self._mouse_cooldown_until.get(button_name, 0.0)
+
+        if in_cooldown:
+            logger.debug(f"[{button_name}] 忽略长按结束后的微动回弹按下")
             return
 
-        # 长按模式
+        if cancelled_pending:
+            logger.debug(f"[{button_name}] 检测到微动瞬断回弹，取消松开定时并保持录音")
+
+        self._submit_action(self._event_handler.handle_keydown, button_name, task)
+
+    def _on_mouse_keyup(self, button_name: str, task) -> None:
+        """在钩子层快速处理鼠标松开：长按模式启用防抖延迟结算"""
+        if not task.shortcut.hold_mode:
+            self._submit_action(self._handle_mouse_click_mode_keyup, button_name, task)
+            return
+
+        up_time = time.time()
+        with self._mouse_lock:
+            self._cancel_mouse_release_timer_locked(button_name)
+            timer_ref: List[Optional[threading.Timer]] = [None]
+            timer = threading.Timer(
+                self.MOUSE_BOUNCE_GRACE_S,
+                self._schedule_mouse_keyup,
+                args=(button_name, task, up_time, timer_ref),
+            )
+            timer.daemon = True
+            timer_ref[0] = timer
+            self._mouse_release_timers[button_name] = timer
+            timer.start()
+
+    def _schedule_mouse_keyup(
+        self,
+        button_name: str,
+        task,
+        up_time: float,
+        timer_ref: List[Optional[threading.Timer]],
+    ) -> None:
+        """防抖窗口期满后，将鼠标松开结算投递到串行执行器"""
+        current_timer = timer_ref[0]
+        with self._mouse_lock:
+            if self._mouse_release_timers.get(button_name) is not current_timer:
+                return
+            self._mouse_release_timers.pop(button_name, None)
+
+        self._submit_action(self._finalize_mouse_keyup, button_name, task, up_time)
+
+    def _handle_mouse_click_mode_keyup(self, button_name: str, task) -> None:
+        """在串行执行器中处理单击模式的鼠标松开"""
+        if task.pressed:
+            task.pressed = False
+            task.released = True
+            task.event.set()
+
+    def _finalize_mouse_keyup(self, button_name: str, task, up_time: float) -> None:
+        """在防抖窗口结束后结算长按模式鼠标松开"""
         if not task.is_recording:
             return
 
-        duration = time.time() - task.recording_start_time
+        duration = max(0.0, up_time - task.recording_start_time)
         logger.debug(f"[{button_name}] 松开按键，持续时间: {duration:.3f}s")
 
         if duration < task.threshold:
+            now = time.time()
+            with self._mouse_lock:
+                in_cooldown = now < self._mouse_cooldown_until.get(button_name, 0.0)
             task.cancel()
-            if task.shortcut.suppress:
+            if task.shortcut.suppress and not in_cooldown:
                 logger.debug(f"[{button_name}] 安排异步补发鼠标按键")
                 self._pool.submit(self._emulator.emulate_mouse_click, button_name)
         else:
+            with self._mouse_lock:
+                self._mouse_cooldown_until[button_name] = time.time() + self.MOUSE_POST_FINISH_COOLDOWN_S
             task.finish()
 
     # ========== 按键恢复管理 ==========
@@ -301,11 +384,18 @@ class ShortcutManager:
             finally:
                 self.mouse_listener = None
 
+        # 取消所有挂起的鼠标防抖定时器
+        with self._mouse_lock:
+            for timer in self._mouse_release_timers.values():
+                timer.cancel()
+            self._mouse_release_timers.clear()
+
         # 取消所有任务
         for task in self.tasks.values():
             if task.is_recording:
                 task.cancel()
 
-        # 关闭线程池
+        # 关闭线程池与串行动作执行器
+        self._action_executor.shutdown(wait=False)
         self._pool.shutdown(wait=False)
         logger.debug("快捷键管理器线程池已关闭")
