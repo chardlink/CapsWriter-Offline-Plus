@@ -31,6 +31,7 @@ WM_DESTROY = 0x0002
 WM_ACTIVATE = 0x0006
 WM_SETCURSOR = 0x0020
 WM_KEYDOWN = 0x0100
+WM_CHAR = 0x0102
 WM_TIMER = 0x0113
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
@@ -52,6 +53,8 @@ AC_SRC_ALPHA = 1
 TME_LEAVE = 0x00000002
 IDC_ARROW = 32512
 IDC_HAND = 32649
+VK_BACK = 0x08
+VK_RETURN = 0x0D
 VK_ESCAPE = 0x1B
 VK_LBUTTON = 0x01
 VK_RBUTTON = 0x02
@@ -258,9 +261,6 @@ THRESHOLD_CHOICES = [
     (0.3, '0.3秒'),
     (0.5, '0.5秒'),
     (0.8, '0.8秒'),
-    (1.0, '1.0秒'),
-    (1.2, '1.2秒'),
-    (1.5, '1.5秒'),
 ]
 
 
@@ -536,6 +536,8 @@ class TrayPanel:
 
         self._selected_days = self._read_retention_days()
         self._selected_threshold = self._read_threshold()
+        self._editing_threshold = False
+        self._threshold_input = ""
         self._console_visible = self._read_console_visible()
 
         self._icon_cache: Dict[Tuple, Image.Image] = {}
@@ -598,9 +600,9 @@ class TrayPanel:
         client_cfg = self.config.get('client') or {}
         fn = client_cfg.get('get_threshold')
         try:
-            return round(float(fn()), 2) if fn else 0.8
+            return round(float(fn()), 2) if fn else 0.3
         except Exception:
-            return 0.8
+            return 0.3
 
     def _sync_live_state(self) -> None:
         self._autostart_val = self._read_autostart()
@@ -609,7 +611,30 @@ class TrayPanel:
         self._switch_at = 0.0
         self._selected_days = self._read_retention_days()
         self._selected_threshold = self._read_threshold()
+        self._editing_threshold = False
+        self._threshold_input = ""
         self._console_visible = self._read_console_visible()
+
+    def _commit_custom_threshold(self) -> None:
+        """提交并保存用户输入的自定义延时秒数（0.05 ~ 5.0 秒）"""
+        raw = (self._threshold_input or '').strip()
+        self._editing_threshold = False
+        self._threshold_input = ""
+        try:
+            val = round(float(raw), 2)
+        except ValueError:
+            self._need_redraw = True
+            self._present(time.monotonic())
+            return
+
+        val = round(max(0.05, min(5.0, val)), 2)
+        self._selected_threshold = val
+        self._need_redraw = True
+        self._present(time.monotonic())
+
+        set_fn = (self.config.get('client') or {}).get('set_threshold')
+        if set_fn:
+            threading.Thread(target=set_fn, args=(val,), daemon=True).start()
 
     # ---- 布局几何与资源缓存 ----
 
@@ -774,8 +799,31 @@ class TrayPanel:
                     self._present(time.monotonic())
                 return 0
             if msg == WM_KEYDOWN:
-                if wparam == VK_ESCAPE:
+                if self._editing_threshold:
+                    if wparam == VK_ESCAPE:
+                        self._editing_threshold = False
+                        self._threshold_input = ""
+                        self._need_redraw = True
+                        self._present(time.monotonic())
+                        return 0
+                    if wparam == VK_RETURN:
+                        self._commit_custom_threshold()
+                        return 0
+                elif wparam == VK_ESCAPE:
                     self._begin_hide()
+                return 0
+            if msg == WM_CHAR:
+                if self._editing_threshold:
+                    ch = chr(wparam & 0xFFFF)
+                    if wparam == VK_BACK or ch == '\b':
+                        self._threshold_input = self._threshold_input[:-1]
+                    elif ch in '0123456789' and len(self._threshold_input) < 4:
+                        self._threshold_input += ch
+                    elif ch in '.。,' and '.' not in self._threshold_input and len(self._threshold_input) < 3:
+                        self._threshold_input = (self._threshold_input or '0') + '.'
+                    self._need_redraw = True
+                    self._present(time.monotonic())
+                    return 0
                 return 0
             if msg == WM_ACTIVATE:
                 if (wparam & 0xFFFF) == 0:  # WA_INACTIVE
@@ -830,6 +878,15 @@ class TrayPanel:
             logger.error(f"CreateWindowExW 失败: {kernel32.GetLastError()}")
             self._ready.set()
             return
+
+        # 禁用输入法组合状态，使自定义秒数框可直接键入 ASCII 数字和小数点
+        try:
+            imm32 = ctypes.WinDLL('imm32')
+            imm32.ImmAssociateContext.argtypes = [wintypes.HWND, ctypes.c_void_p]
+            imm32.ImmAssociateContext.restype = ctypes.c_void_p
+            imm32.ImmAssociateContext(self.hwnd, None)
+        except Exception:
+            pass
 
         dpi = user32.GetDpiForWindow(self.hwnd) if hasattr(user32, 'GetDpiForWindow') else 96
         self._build_assets((dpi or 96) / 96.0)
@@ -918,6 +975,8 @@ class TrayPanel:
         self._hidden_at = time.monotonic()
         self._hover_id = None
         self._press_id = None
+        self._editing_threshold = False
+        self._threshold_input = ""
         if self.hwnd:
             user32.KillTimer(self.hwnd, TIMER_ANIM)
             user32.KillTimer(self.hwnd, TIMER_GUARD)
@@ -1008,6 +1067,20 @@ class TrayPanel:
     def _invoke_hit(self, hit) -> None:
         hit_id, _, action, close_on_click = hit
         now = time.monotonic()
+        if hit_id == 'thr_custom':
+            self._editing_threshold = True
+            self._threshold_input = ""
+            self._need_redraw = True
+            self._present(now)
+            return
+        if hit_id == 'thr_confirm':
+            self._commit_custom_threshold()
+            return
+        if self._editing_threshold:
+            self._editing_threshold = False
+            self._threshold_input = ""
+            self._need_redraw = True
+            self._present(now)
         if hit_id == 'tab_0':
             if self._active_tab != 0:
                 self._tab_from = self._current_tab_pos(now)
@@ -1349,11 +1422,66 @@ class TrayPanel:
             '按住超此时长才弹框', font=self.f_small, fill=TEXT_MUTED + (255,), anchor='rm',
         )
 
+        tpy0 = ty0 + int(round(34 * s))
+        tph = int(round(26 * s))
+        t_pcy = tpy0 + tph // 2
+        cur_thr = float(getattr(self, '_selected_threshold', 0.3))
+        editing = bool(getattr(self, '_editing_threshold', False))
+        set_thr = client_cfg.get('set_threshold')
+
+        pgap = int(round(5 * s))
+        pw = int(round(44 * s))
+        left_w = len(THRESHOLD_CHOICES) * pw + (len(THRESHOLD_CHOICES) - 1) * pgap
         self._render_pill_row(
-            frame, d, hits, rx0, ty0 + int(round(34 * s)), rw, int(round(26 * s)),
-            THRESHOLD_CHOICES, 'thr_', getattr(self, '_selected_threshold', 0.8),
-            client_cfg.get('set_threshold'), tol=0.05,
+            frame, d, hits, rx0, tpy0, left_w, tph,
+            THRESHOLD_CHOICES, 'thr_', -1.0 if editing else cur_thr,
+            set_thr, tol=0.005,
         )
+
+        # 右侧剩余空白区域：自定义秒数输入框
+        cx0 = rx0 + left_w + pgap
+        cx1 = rx0 + rw
+        if editing:
+            confirm_w = int(round(36 * s))
+            gap_c = int(round(4 * s))
+            inp_x1 = cx1 - confirm_w - gap_c
+            inp_rect = (cx0, tpy0, inp_x1, tpy0 + tph)
+            inp_box = _draw_rr(
+                (inp_x1 - cx0, tph), tph / 2,
+                fill=(8, 12, 22, 230), outline=(56, 189, 248, 220), width=1.4,
+            )
+            frame.alpha_composite(inp_box, (cx0, tpy0))
+            inp_str = getattr(self, '_threshold_input', '') or ''
+            if inp_str:
+                disp, tcol = f"{inp_str}| 秒", TEXT_PRIMARY
+            else:
+                disp, tcol = "输入(如0.25)|", TEXT_MUTED
+            d.text(((cx0 + inp_x1) // 2, t_pcy), disp, font=self.f_small, fill=tcol + (255,), anchor='mm')
+            hits.append(('thr_custom', inp_rect, None, False))
+
+            cfm_x0 = cx1 - confirm_w
+            cfm_rect = (cfm_x0, tpy0, cx1, tpy0 + tph)
+            cfm_pill = _draw_grad_pill(confirm_w, tph, tph / 2, ACCENT_C1, ACCENT_C2, 245)
+            frame.alpha_composite(cfm_pill, (cfm_x0, tpy0))
+            d.text(((cfm_x0 + cx1) // 2, t_pcy), '确定', font=self.f_small_bold, fill=(255, 255, 255, 255), anchor='mm')
+            hits.append(('thr_confirm', cfm_rect, None, False))
+        else:
+            crect = (cx0, tpy0, cx1, tpy0 + tph)
+            is_custom = all(abs(cur_thr - v) >= 0.005 for v, _ in THRESHOLD_CHOICES)
+            if is_custom:
+                self._draw_tile(frame, 'thr_custom', crect, tph / 2, selected=True)
+                d.text(
+                    ((cx0 + cx1) // 2, t_pcy),
+                    f"自定义: {cur_thr:g}秒", font=self.f_small_bold, fill=(255, 255, 255, 255), anchor='mm',
+                )
+            else:
+                hovered_c = self._hover_id == 'thr_custom'
+                outline_c = (56, 189, 248, 110) if hovered_c else (255, 255, 255, 38)
+                box = _draw_rr((cx1 - cx0, tph), tph / 2, fill=(8, 12, 22, 165), outline=outline_c, width=1)
+                frame.alpha_composite(box, (cx0, tpy0))
+                tcol = TEXT_PRIMARY if hovered_c else TEXT_MUTED
+                d.text(((cx0 + cx1) // 2, t_pcy), '自定义秒数…', font=self.f_small, fill=tcol + (255,), anchor='mm')
+            hits.append(('thr_custom', crect, None, False))
 
     def _render_pill_row(
         self,

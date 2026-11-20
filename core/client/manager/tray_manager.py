@@ -77,11 +77,11 @@ class TrayManager:
 
         threshold_menu = [
             (
-                f'{sec:g} 秒' + (' (推荐)' if sec == 0.8 else ''),
+                f'{sec:g} 秒' + (' (默认)' if sec == 0.3 else ''),
                 lambda icon=None, item=None, s=sec: self._set_threshold(s),
-                {'checked': lambda _, s=sec: abs(getattr(Config, 'threshold', 0.8) - s) < 0.05},
+                {'checked': lambda _, s=sec: abs(getattr(Config, 'threshold', 0.3) - s) < 0.005},
             )
-            for sec in (0.3, 0.5, 0.8, 1.0, 1.2, 1.5)
+            for sec in (0.3, 0.5, 0.8)
         ]
 
         diary_submenu = [
@@ -138,7 +138,7 @@ class TrayManager:
                     'get_retention_days': lambda: getattr(Config, 'auto_clean_days', 3),
                     'set_retention_days': self._set_retention_days,
                 },
-                'get_threshold': lambda: getattr(Config, 'threshold', 0.8),
+                'get_threshold': lambda: getattr(Config, 'threshold', 0.3),
                 'set_threshold': self._set_threshold,
             },
         }

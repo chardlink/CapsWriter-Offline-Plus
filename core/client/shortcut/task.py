@@ -51,7 +51,7 @@ class ShortcutTask:
         self.pressed: bool = False
         self.released: bool = True
         self.event: Event = Event()
-        self.threshold: float = 0.8
+        self.threshold: float = 0.3
         self.pending_release: bool = False
         self.overlay_shown: bool = False
         self._overlay_lock: Lock = Lock()
