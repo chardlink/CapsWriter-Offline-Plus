@@ -1,4 +1,4 @@
-# CapsWriter-Offline-Plus (v2.6)
+# CapsWriter-Offline-Plus (v1.0)
 
 > 基于开源项目 [HaujetZhao/CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline)（MIT 协议）深度定制的个人增强版。  
 > 保留原版完全离线、低延迟、高准确率引擎与全套模型支持，针对单机个人日常使用重做了**一体化启动、毛玻璃流式语音悬浮窗、现代托盘控制面板与自动清理**。
@@ -89,7 +89,7 @@
 
 1. **准备环境**：确保安装了 [VC++ 运行库](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)。若需要以 MP3 格式保存录音或使用文件转录功能，建议安装 [ffmpeg](https://ffmpeg.org/download.html) 并确保其在系统 PATH 中。
 2. **下载程序与模型**：
-   - 从本仓库的 **Releases** 页面下载绿色运行包 `CapsWriter-Offline-Portable-v2.6.zip` 并解压；
+   - 从本仓库的 **Releases** 页面下载绿色运行包 `CapsWriter-Offline-Plus-v1.0.zip` 并解压；
    - 下载语音模型压缩包（如 `Qwen3-ASR-1.7B-q5_k.zip`），可从**本仓库 Releases** 下载，也可前往原项目 [Models Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models) 获取全套多引擎模型（Fun-ASR-Nano、SenseVoice-Small、Paraformer 等），解压放入 `models/` 下对应引擎目录中（如 `models/Qwen3-ASR/Qwen3-ASR-1.7B/`）。
 3. **一键启动**：直接双击根目录的 **`CapsWriter.exe`**，程序会自动拉起内置服务端并最小化到右下角托盘图标。
 4. **开始语音输入**：按住 **`CapsLock`** 键或 **`鼠标侧键 X2`** 说话即可实时看到悬浮窗字幕，松开按键自动瞬间粘贴上屏！
