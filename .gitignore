@@ -1,6 +1,9 @@
-# 模型文件（单独下载放置到 models/ 目录）
-models/*
-!models/README.md
+# 模型权重文件（单独放到 GitHub Releases，仓库保留目录结构与下载说明）
+models/**/*.onnx
+models/**/*.gguf
+models/**/*.model
+models/**/*.bin
+models/**/*.pt
 
 # 打包后的免安装运行环境与二进制库（放在 GitHub Releases）
 internal/
