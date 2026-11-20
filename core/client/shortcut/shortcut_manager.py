@@ -202,6 +202,14 @@ class ShortcutManager:
 
         if cancelled_pending:
             logger.debug(f"[{button_name}] 检测到微动瞬断回弹，取消松开定时并保持录音")
+            task.pending_release = False
+            if (
+                task.is_recording
+                and not getattr(task, 'overlay_shown', False)
+                and (now - task.recording_start_time) >= task.threshold
+                and hasattr(task, 'ensure_overlay_shown')
+            ):
+                self._submit_action(task.ensure_overlay_shown, task.recording_start_time)
 
         self._submit_action(self._event_handler.handle_keydown, button_name, task)
 
@@ -211,6 +219,7 @@ class ShortcutManager:
             self._submit_action(self._handle_mouse_click_mode_keyup, button_name, task)
             return
 
+        task.pending_release = True
         up_time = time.time()
         with self._mouse_lock:
             self._cancel_mouse_release_timer_locked(button_name)

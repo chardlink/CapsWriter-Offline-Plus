@@ -8,7 +8,7 @@
 from __future__ import annotations
 import asyncio
 import time
-from threading import Event
+from threading import Event, Lock, Timer
 from typing import TYPE_CHECKING, Optional
 
 from . import logger
@@ -51,6 +51,11 @@ class ShortcutTask:
         self.pressed: bool = False
         self.released: bool = True
         self.event: Event = Event()
+        self.threshold: float = 0.8
+        self.pending_release: bool = False
+        self.overlay_shown: bool = False
+        self._overlay_lock: Lock = Lock()
+        self._overlay_timer: Optional[Timer] = None
 
         # 线程池（用于 countdown）
         self.pool = None
@@ -70,13 +75,44 @@ class ShortcutTask:
             self._recorder_class = AudioRecorder
         return self._recorder_class(self.app)
 
+    def _cancel_overlay_timer(self) -> None:
+        """取消挂起的悬浮窗延迟显示定时器"""
+        with self._overlay_lock:
+            if self._overlay_timer is not None:
+                self._overlay_timer.cancel()
+                self._overlay_timer = None
+
+    def ensure_overlay_shown(self, start_time: Optional[float] = None) -> None:
+        """在确认进入长按语音识别后显示录音悬浮窗"""
+        with self._overlay_lock:
+            target_time = self.recording_start_time if start_time is None else start_time
+            if (
+                not self.is_recording
+                or self.pending_release
+                or self.recording_start_time != target_time
+                or self.overlay_shown
+            ):
+                return
+            if self._overlay_timer is not None:
+                self._overlay_timer.cancel()
+                self._overlay_timer = None
+            self.overlay_shown = True
+
+        self.app.overlay.recording(target_time)
+
     def launch(self) -> None:
         """启动录音任务"""
         logger.info(f"[{self.shortcut.key}] 触发：开始录音")
 
-        # 记录开始时间
-        self.recording_start_time = time.time()
-        self.is_recording = True
+        # 记录开始时间并复位浮窗状态
+        with self._overlay_lock:
+            self.recording_start_time = time.time()
+            self.is_recording = True
+            self.pending_release = False
+            self.overlay_shown = False
+            if self._overlay_timer is not None:
+                self._overlay_timer.cancel()
+                self._overlay_timer = None
 
         # 将开始标志放入队列
         asyncio.run_coroutine_threadsafe(
@@ -84,9 +120,18 @@ class ShortcutTask:
             self.app.loop
         )
 
-        # 更新录音状态
+        # 更新录音状态（先在后台缓存音频，按住达到阈值后再弹出悬浮窗）
         self.state.start_recording(self.recording_start_time)
-        self.app.overlay.recording(self.recording_start_time)
+        if self.shortcut.hold_mode and self.threshold > 0:
+            start_time = self.recording_start_time
+            with self._overlay_lock:
+                if self.is_recording and not self.pending_release and not self.overlay_shown:
+                    timer = Timer(self.threshold, self.ensure_overlay_shown, args=(start_time,))
+                    timer.daemon = True
+                    self._overlay_timer = timer
+                    timer.start()
+        else:
+            self.ensure_overlay_shown(self.recording_start_time)
 
         # 打印动画：正在录音
         self._status.start()
@@ -102,21 +147,42 @@ class ShortcutTask:
         """取消录音任务（时间过短）"""
         logger.debug(f"[{self.shortcut.key}] 取消录音任务（时间过短）")
 
-        self.is_recording = False
+        with self._overlay_lock:
+            self.is_recording = False
+            self.pending_release = False
+            if self._overlay_timer is not None:
+                self._overlay_timer.cancel()
+                self._overlay_timer = None
+            was_shown = self.overlay_shown
+            self.overlay_shown = False
+
         self.state.stop_recording()
         self._status.stop()
-        self.app.overlay.cancel(self.recording_start_time)
+        if was_shown:
+            self.app.overlay.cancel(self.recording_start_time)
 
-        self.task.cancel()
-        self.task = None
+        if self.task is not None:
+            self.task.cancel()
+            self.task = None
 
     def finish(self) -> None:
         """完成录音任务"""
         logger.info(f"[{self.shortcut.key}] 释放：完成录音")
 
-        self.is_recording = False
+        with self._overlay_lock:
+            self.is_recording = False
+            self.pending_release = False
+            if self._overlay_timer is not None:
+                self._overlay_timer.cancel()
+                self._overlay_timer = None
+            need_show = not self.overlay_shown
+            if need_show:
+                self.overlay_shown = True
+
         self.state.stop_recording()
         self._status.stop()
+        if need_show:
+            self.app.overlay.recording(self.recording_start_time)
         self.app.overlay.processing(self.recording_start_time)
 
         asyncio.run_coroutine_threadsafe(

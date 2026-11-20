@@ -32,7 +32,7 @@ class ClientConfig:
         },
     ]
 
-    threshold    = 0.3          # 快捷键触发阈值（秒）
+    threshold    = 0.8          # 快捷键触发阈值（秒）：按住达到此时长才弹出语音悬浮窗并识别，短于此时长视为普通按键/点击
 
     paste        = True         # 是否以写入剪切板然后模拟 Ctrl-V 粘贴的方式输出结果
     restore_clip = True         # 模拟粘贴后是否恢复剪贴板

@@ -251,6 +251,16 @@ class AudioRecorder:
 
         except asyncio.CancelledError:
             # 录音被取消（短按时间过短 / 单击模式超时取消）。
+            # 清理可能已创建的部分录音文件，避免遗留孤立临时音频
+            file_manager = getattr(self, '_file_manager', None)
+            if file_manager and file_path is not None:
+                try:
+                    from pathlib import Path
+                    file_manager.finish()
+                    Path(file_path).unlink(missing_ok=True)
+                except Exception as cleanup_err:
+                    logger.debug(f"取消录音清理临时音频文件失败: {cleanup_err}")
+
             # 此时本会话的 begin 以及阈值前积攒的 data 可能还残留在全局
             # queue_in 中，而该队列由所有录音会话共用。若不清理，下一次
             # record_and_send() 会读到带旧 task_id 语义的脏数据，导致
