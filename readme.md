@@ -1,4 +1,4 @@
-# CapsWriter-Offline-Plus (v1.0)
+# CapsWriter-Offline-Plus (v1.1)
 
 > 基于开源项目 [HaujetZhao/CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline)（MIT 协议）深度定制的个人增强版。  
 > 保留原版完全离线、低延迟、高准确率引擎与全套模型支持，针对单机个人日常使用重做了**一体化启动、毛玻璃流式语音悬浮窗、现代托盘控制面板与自动清理**。
@@ -26,12 +26,17 @@
 - **0 级嵌套单卡收纳**：基于纯 Win32 分层窗口 (`UpdateLayeredWindow`) + Pillow 绘制，右键托盘图标在屏幕工作区边缘弹出半透明毛玻璃圆角卡片，彻底告别传统右键菜单多层向右展开、贴边往左折叠遮挡的问题。
 - **客户端 / 服务端分页切换**：面板内直接平滑切换「客户端」与「服务端」视图，支持独立重启服务端识别引擎或热重载客户端组件。
 - **开机自启动一键开关**：底部集成 Windows 注册表（`HKCU\...\Run`）开机自启滑动开关，所有托盘操作提示统一接入底部毛玻璃胶囊悬浮通知。
+- **长按触发延时自由调节**：面板内置「长按触发延时」卡片，提供 `0.3秒 / 0.5秒 / 0.8秒` 快捷档位与右侧「自定义秒数…」输入框（可直接键入如 `0.2`、`0.25`、`0.65` 等任意秒数），无需重启当场生效并自动持久化保存。
 
 ![毛玻璃托盘控制面板预览](assets/tray_panel_preview.png)
 
 ### 4. 录音与日记自动彻底清理
 - **自动回收磁盘空间**：默认保留最近 **3 天**的语音日记（`.md`）与录音文件（`assets/*.mp3` / `.wav`），过期文件会直接从磁盘永久删除（不经过回收站）并自动清除空目录。
 - **托盘面板一键调节**：无需翻找配置文件，在托盘面板的「日记与录音」卡片中即可点击切换 `1天 / 3天 / 7天 / 15天 / 30天 / 永久`，或一键打开当月目录 / 立即清理。
+
+### 5. 快捷键与鼠标侧键防抖防误触增强 (v1.1 新增)
+- **长按达标才弹窗，轻按零闪烁**：按下 `CapsLock (大写锁定键)` 或 `鼠标前侧键 (X2)` 时先在后台内存静音缓存音频，按住达到设定延时阈值（默认 `0.3 秒`）才弹出语音识别悬浮窗；日常轻按切换大小写或正常点击鼠标侧键时**绝不闪出语音框**，同时不丢失开口第一句话。
+- **鼠标侧键微动防抖与低延迟异步钩子**：底层 `WH_MOUSE_LL` / `WH_KEYBOARD_LL` 钩子采用无阻塞串行派发，并为鼠标侧键加入 **180ms 按住瞬断防抖** 与 **350ms 松手回弹冷却**，彻底解决微动瞬断导致录音中断、松手回弹误触发网页“前进/后退”以及偶发按住不灵敏的问题。
 
 ---
 
@@ -89,7 +94,7 @@
 
 1. **准备环境**：确保安装了 [VC++ 运行库](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)。若需要以 MP3 格式保存录音或使用文件转录功能，建议安装 [ffmpeg](https://ffmpeg.org/download.html) 并确保其在系统 PATH 中。
 2. **下载程序与模型**：
-   - 从本仓库的 [v1.0 Release](https://github.com/chardlink/CapsWriter-Offline-Plus/releases/tag/v1.0) 下载绿色运行包 `CapsWriter-Offline-Plus-v1.0.zip` 并解压；
+   - 从本仓库的 [v1.1 Release](https://github.com/chardlink/CapsWriter-Offline-Plus/releases/tag/v1.1) 下载绿色运行包 `CapsWriter-Offline-Plus-v1.1.zip` 并解压；
    - 下载语音模型压缩包（如 `Qwen3-ASR-1.7B-q5_k.zip`），请前往本仓库 [Models Release](https://github.com/chardlink/CapsWriter-Offline-Plus/releases/tag/models) 下载全套独立备份模型（原项目镜像：[HaujetZhao/CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models)），解压放入 `models/` 下对应引擎目录中（如 `models/Qwen3-ASR/Qwen3-ASR-1.7B/`）。
 3. **一键启动**：直接双击根目录的 **`CapsWriter.exe`**，程序会自动拉起内置服务端并最小化到右下角托盘图标。
 4. **开始语音输入**：按住 **`CapsLock`** 键或 **`鼠标侧键 X2`** 说话即可实时看到悬浮窗字幕，松开按键自动瞬间粘贴上屏！
