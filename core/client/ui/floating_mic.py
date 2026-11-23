@@ -348,40 +348,74 @@ class FloatingMicButton:
 
     def _init_geometry(self) -> None:
         s = self.s
-        # 画布尺寸：左侧悬浮球区域 + 右侧右键“隐藏按钮”胶囊展开区
+        # 画布尺寸：中间悬浮球 + 左右对称的右键“隐藏悬浮球”胶囊展开区
+        # （悬浮球位于屏幕中轴线左侧时向右展开，位于中轴线右侧时向左展开）
         self.glow_pad = int(round(14 * s))
         self.orb_d = int(round(54 * s))
         self.menu_gap = int(round(8 * s))
         self.menu_w = int(round(108 * s))
         self.menu_h = int(round(36 * s))
 
-        self.win_w = self.glow_pad * 2 + self.orb_d + self.menu_gap + self.menu_w
+        self.win_w = (
+            self.glow_pad * 2
+            + self.orb_d
+            + (self.menu_gap + self.menu_w) * 2
+        )
         self.win_h = self.glow_pad * 2 + self.orb_d
 
-        # 悬浮球圆心与矩形
-        self.orb_x0 = self.glow_pad
+        # 悬浮球圆心与矩形（居中放置，左右均可展开菜单而不改变悬浮球屏幕坐标）
+        self.orb_x0 = self.glow_pad + self.menu_w + self.menu_gap
         self.orb_y0 = self.glow_pad
         self.orb_cx = self.orb_x0 + self.orb_d // 2
         self.orb_cy = self.orb_y0 + self.orb_d // 2
         self.orb_r = self.orb_d // 2
 
-        # 右键菜单胶囊矩形
-        self.menu_x0 = self.orb_x0 + self.orb_d + self.menu_gap
+        # 右侧与左侧菜单胶囊矩形
         self.menu_y0 = self.orb_cy - self.menu_h // 2
-        self.menu_rect = (
-            self.menu_x0,
+        self.menu_x0_right = self.orb_x0 + self.orb_d + self.menu_gap
+        self.menu_x0_left = self.orb_x0 - self.menu_gap - self.menu_w
+        self.menu_rect_right = (
+            self.menu_x0_right,
             self.menu_y0,
-            self.menu_x0 + self.menu_w,
+            self.menu_x0_right + self.menu_w,
             self.menu_y0 + self.menu_h,
         )
+        self.menu_rect_left = (
+            self.menu_x0_left,
+            self.menu_y0,
+            self.menu_x0_left + self.menu_w,
+            self.menu_y0 + self.menu_h,
+        )
+        # 默认方向：'left'（因初始位置在屏幕右下角，中轴线右侧默认向左展开）
+        self._menu_side = "left"
+        self.menu_rect = self.menu_rect_left
 
         self.f_menu = _load_font(int(round(12 * s)), bold=True)
         self.f_rec = _load_font(int(round(9 * s)), bold=True)
 
-        # 默认初始位置：主屏幕右下角偏上（避开任务栏与右下角通知区）
+        # 默认初始位置：主屏幕右下角偏上（避开右侧/底部任务栏与通知区）
         work = self._get_work_area(POINT(200, 200))
-        self.win_x = max(work.left + 20, work.right - self.win_w - int(round(36 * s)))
+        target_orb_right = work.right - int(round(36 * s))
+        self.win_x = max(
+            work.left - self.orb_x0 + 20,
+            target_orb_right - (self.orb_x0 + self.orb_d),
+        )
         self.win_y = max(work.top + 40, work.bottom - self.win_h - int(round(140 * s)))
+        self._update_menu_side()
+
+    def _update_menu_side(self) -> str:
+        """以当前显示器工作区中轴线为准：中轴线左侧向右展开，中轴线右侧向左展开"""
+        orb_screen_cx = int(self.win_x + self.orb_cx)
+        orb_screen_cy = int(self.win_y + self.orb_cy)
+        work = self._get_work_area(POINT(orb_screen_cx, orb_screen_cy))
+        mid_x = (work.left + work.right) // 2
+        if orb_screen_cx <= mid_x:
+            self._menu_side = "right"
+            self.menu_rect = self.menu_rect_right
+        else:
+            self._menu_side = "left"
+            self.menu_rect = self.menu_rect_left
+        return self._menu_side
 
     def _get_work_area(self, pt: POINT) -> RECT:
         mi = MONITORINFO()
@@ -608,8 +642,9 @@ class FloatingMicButton:
         glyph = self._draw_mic_or_stop_glyph(ico_sz, is_recording=recording)
         frame.alpha_composite(glyph, (cx - ico_sz // 2, cy - ico_sz // 2))
 
-        # 6. 右键弹出胶囊菜单：[× 隐藏按钮]
+        # 6. 右键弹出胶囊菜单：[× 隐藏悬浮球]（根据屏幕中轴线自动向左或向右展开）
         if menu_open:
+            self._update_menu_side()
             mx0, my0, mx1, my1 = self.menu_rect
             mw, mh = mx1 - mx0, my1 - my0
             bg_col = (30, 38, 58, 245) if self._hover_menu else (18, 23, 38, 240)
@@ -891,6 +926,7 @@ class FloatingMicButton:
             lx = ctypes.c_short(lparam & 0xFFFF).value
             ly = ctypes.c_short((lparam >> 16) & 0xFFFF).value
             if self._hit_main_orb(lx, ly) or self._hit_menu_pill(lx, ly):
+                self._update_menu_side()
                 self._menu_open = not self._menu_open
                 self._present()
             return 0
