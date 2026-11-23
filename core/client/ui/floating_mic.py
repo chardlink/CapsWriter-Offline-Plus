@@ -1,16 +1,17 @@
 # coding: utf-8
 """
-桌面悬浮语音识别按钮 (FloatingMicButton)
+桌面悬浮语音识别按钮 (FloatingMicButton) —— 科幻流体毛玻璃质感版
 
-功能特性：
-1. 视觉风格与 TrayPanel / RecordingOverlay 高度统一：
-   - 待机态：深空毛玻璃底座 + 青紫极光渐变 (Cyan -> Violet) 麦克风核心，悬浮微光。
-   - 录音态：玫瑰红脉冲呼吸光环 (Rose Red) + 圆角正方形停止图标 (⏹)，直观提示“再次点击即可结束识别”。
-   - 右键菜单态：在悬浮球右侧/左侧展开一体式毛玻璃胶囊菜单 [× 隐藏悬浮按钮]，点击即可隐藏并自动同步取消设置页勾选。
+视觉与交互特性：
+1. 与底部流式字幕悬浮条 (RecordingOverlay) 同源的科幻流体毛玻璃美学：
+   - 预渲染高扩散双色霓虹外发光 (GaussianBlur 16*s) + 3D 顶部镜面高光玻璃底座 + 渐变流光边框。
+   - 充裕的 32*s 四周全透明光晕画布，彻底杜绝呼吸光环或扩散波纹在上下左右被窗口边界截断。
+   - 纯色彩光晕扩散与声波驱动呼吸（无任何灰边伪影），直接联动麦克风实时音量 (overlay._level_in) 驱动光晕、波纹与球心微呼吸。
+   - 待机态：深空流体玻璃底座 + 极光青-霓虹紫 3D 球心 + 发光矢量麦克风。
+   - 录音态：绯红-玫瑰霓虹脉冲光晕 + 双层水波纹 + 3D 绯红发光球心 + 带柔和辉光的圆角正方形停止键 (⏹)。
 2. 零焦点抢占 (WS_EX_NOACTIVATE + WM_MOUSEACTIVATE -> MA_NOACTIVATE)：
-   - 点击悬浮球开始/停止录音时，绝不抢占用户当前活动窗口（浏览器、Word、微信、IDE 等）的输入焦点，识别完成后直接粘贴到原光标处。
-3. 自由拖拽 + 智能贴边防出界：
-   - 按住左键拖动 (>5px) 可在屏幕任意位置顺滑移动，松开不误触录音；轻点左键立即切换“开始录音 / 停止识别”。
+   - 点击悬浮球开始/停止录音时，绝不抢占当前打字窗口焦点，识别完成后直接粘贴到原光标处。
+3. 自由拖拽 + 屏幕中轴线智能左右展开右键菜单 + 点击任意空白处自动收起右键菜单。
 """
 
 import ctypes
@@ -20,7 +21,8 @@ import threading
 import time
 from typing import Callable, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+import numpy as np
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 from core.client.shortcut.shortcut_config import Shortcut
 from core.client.shortcut.task import ShortcutTask
@@ -50,7 +52,6 @@ WM_APP_CLOSE = 0x8003
 WM_APP_REDRAW = 0x8004
 
 MA_NOACTIVATE = 3
-MA_NOACTIVATEANDEAT = 4
 
 SW_HIDE = 0
 SW_SHOWNOACTIVATE = 4
@@ -78,13 +79,14 @@ VK_RBUTTON = 0x02
 VK_MBUTTON = 0x04
 VK_ESCAPE = 0x1B
 
-# ── 主题色板（与 TrayPanel / RecordingOverlay 保持一致）──────────
-BG_GLASS = (17, 21, 34)
-ACCENT_C1 = (56, 189, 248)     # 极光青 #38BDF8
-ACCENT_C2 = (139, 92, 246)     # 霓虹紫 #8B5CF6
-ROSE_C1 = (251, 113, 133)      # 珊瑚粉 #FB7185
-ROSE_C2 = (225, 29, 72)        # 绯红 #E11D48
-TEXT_PRIMARY = (248, 250, 252)
+# ── 与 RecordingOverlay 完全同源的科幻色板 ────────────────────────
+BODY_COLOR = (14, 18, 30, 178)     # 深空半透明毛玻璃底色
+ACCENT_C1 = (56, 189, 248)         # 极光青 #38BDF8
+ACCENT_C2 = (139, 92, 246)         # 霓虹紫 #8B5CF6
+REC_C1 = (251, 113, 133)           # 珊瑚霓虹红 #FB7185
+REC_C2 = (236, 72, 153)            # 电光品红 #EC4899
+REC_CORE_C2 = (225, 29, 72)        # 绯红核心 #E11D48
+TEXT_PRIMARY = (246, 248, 255)
 TEXT_SECONDARY = (203, 213, 225)
 
 
@@ -236,6 +238,45 @@ gdi32.DeleteDC.argtypes = [wintypes.HDC]
 gdi32.DeleteDC.restype = wintypes.BOOL
 
 
+def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return lo if v < lo else hi if v > hi else v
+
+
+def _ease_out(t: float) -> float:
+    t = _clamp(t)
+    return 1.0 - (1.0 - t) ** 3
+
+
+def _mix(c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
+    t = _clamp(t)
+    return (
+        int(round(c1[0] + (c2[0] - c1[0]) * t)),
+        int(round(c1[1] + (c2[1] - c1[1]) * t)),
+        int(round(c1[2] + (c2[2] - c1[2]) * t)),
+    )
+
+
+def _scale_alpha(img: Image.Image, k: float) -> Image.Image:
+    if k >= 0.999:
+        return img
+    out = img.copy()
+    a = (np.asarray(out.getchannel("A"), dtype=np.float32) * _clamp(k)).astype(np.uint8)
+    out.putalpha(Image.fromarray(a, "L"))
+    return out
+
+
+def _diag_grad(width: int, height: int, c1: Tuple[int, int, int], c2: Tuple[int, int, int]) -> Image.Image:
+    """生成对角线平滑双色渐变图（纯彩 RGB + 满 Alpha，彻底杜绝黑色边缘混色发灰）"""
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    denom = max(1.0, float(width + height - 2))
+    t = np.clip((xx + yy) / denom, 0.0, 1.0)[..., None]
+    rgb = np.asarray(c1, np.float32) * (1.0 - t) + np.asarray(c2, np.float32) * t
+    arr = np.empty((height, width, 4), np.uint8)
+    arr[..., :3] = rgb.astype(np.uint8)
+    arr[..., 3] = 255
+    return Image.fromarray(arr, "RGBA")
+
+
 def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     candidates = (
         ["msyhbd.ttc", "msyh.ttc", "segoeui.ttf"]
@@ -250,57 +291,9 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _mix(c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
-    t = max(0.0, min(1.0, t))
-    return (
-        int(round(c1[0] + (c2[0] - c1[0]) * t)),
-        int(round(c1[1] + (c2[1] - c1[1]) * t)),
-        int(round(c1[2] + (c2[2] - c1[2]) * t)),
-    )
-
-
-def _draw_grad_circle(diameter: int, c1: Tuple[int, int, int], c2: Tuple[int, int, int], alpha: int = 255) -> Image.Image:
-    """绘制 4x 超采样抗锯齿斜向渐变圆"""
-    grad = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
-    px = grad.load()
-    denom = max(1, (diameter - 1) * 2)
-    for y in range(diameter):
-        for x in range(diameter):
-            t = (x + y) / denom
-            r, g, b = _mix(c1, c2, t)
-            px[x, y] = (r, g, b, alpha)
-    mask = Image.new("L", (diameter * 4, diameter * 4), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, diameter * 4 - 1, diameter * 4 - 1), fill=255)
-    mask = mask.resize((diameter, diameter), Image.LANCZOS)
-    out = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
-    out.paste(grad, (0, 0), mask)
-    return out
-
-
-def _draw_rr(
-    size: Tuple[int, int],
-    radius: float,
-    fill=None,
-    outline=None,
-    width: int = 1,
-) -> Image.Image:
-    w, h = max(1, int(size[0])), max(1, int(size[1]))
-    scale = 4
-    big = Image.new("RGBA", (w * scale, h * scale), (0, 0, 0, 0))
-    d = ImageDraw.Draw(big)
-    d.rounded_rectangle(
-        (0, 0, w * scale - 1, h * scale - 1),
-        radius=int(round(radius * scale)),
-        fill=fill,
-        outline=outline,
-        width=max(1, int(round(width * scale))) if outline else 0,
-    )
-    return big.resize((w, h), Image.LANCZOS)
-
-
 class FloatingMicButton:
     """
-    桌面悬浮语音按钮（点击开始录音 / 再次点击结束识别 / 可自由拖动 / 右键隐藏）
+    桌面悬浮语音按钮（科幻流体毛玻璃质感 · 点击开始/再次点击结束 · 自由拖动 · 右键隐藏）
     """
 
     def __init__(self, app, on_user_hide: Optional[Callable[[], None]] = None):
@@ -323,7 +316,7 @@ class FloatingMicButton:
         self._ready_evt = threading.Event()
         self._wndproc_ref = None
 
-        # 状态
+        # 状态与平滑过渡动画
         self._visible = False
         self._hover_main = False
         self._hover_menu = False
@@ -332,6 +325,8 @@ class FloatingMicButton:
         self._menu_opened_at = 0.0
         self._tracking_leave = False
         self._last_recording_state = False
+        self._theme_at = 0.0
+        self._lvl = 0.0  # 平滑后的实时声波能量 (0.0 ~ 1.0)
 
         # 拖拽状态
         self._lbutton_down = False
@@ -339,9 +334,10 @@ class FloatingMicButton:
         self._down_screen_pt = (0, 0)
         self._down_win_pt = (0, 0)
 
-        # DPI 缩放与几何尺寸
+        # DPI 缩放与预渲染高品质资源
         self.s = self._detect_scale()
         self._init_geometry()
+        self._build_assets()
 
     def _detect_scale(self) -> float:
         try:
@@ -356,27 +352,29 @@ class FloatingMicButton:
 
     def _init_geometry(self) -> None:
         s = self.s
-        # 画布尺寸：中间悬浮球 + 左右对称的右键“隐藏悬浮球”胶囊展开区
-        # （悬浮球位于屏幕中轴线左侧时向右展开，位于中轴线右侧时向左展开）
-        self.glow_pad = int(round(14 * s))
-        self.orb_d = int(round(54 * s))
-        self.menu_gap = int(round(8 * s))
-        self.menu_w = int(round(108 * s))
-        self.menu_h = int(round(36 * s))
-
-        self.win_w = (
-            self.glow_pad * 2
-            + self.orb_d
-            + (self.menu_gap + self.menu_w) * 2
-        )
-        self.win_h = self.glow_pad * 2 + self.orb_d
-
-        # 悬浮球圆心与矩形（居中放置，左右均可展开菜单而不改变悬浮球屏幕坐标）
-        self.orb_x0 = self.glow_pad + self.menu_w + self.menu_gap
-        self.orb_y0 = self.glow_pad
-        self.orb_cx = self.orb_x0 + self.orb_d // 2
-        self.orb_cy = self.orb_y0 + self.orb_d // 2
+        # 关键升级：将四周光晕留白扩大到 32*s（原先仅 14*s），
+        # 确保 GaussianBlur(14*s) 呼吸光晕与扩散波纹在上下左右拥有充足空间，绝不截断！
+        self.glow_pad = int(round(32 * s))
+        self.orb_d = int(round(58 * s))          # 外层流体毛玻璃舱直径
         self.orb_r = self.orb_d // 2
+        self.core_r = int(round(20 * s))         # 内部 3D 渐变发光球体半径
+        self.orb_box = self.orb_d + self.glow_pad * 2  # 局部球体+光晕完整正方形画布 (122*s)
+
+        self.menu_gap = int(round(10 * s))
+        self.menu_w = int(round(114 * s))
+        self.menu_h = int(round(38 * s))
+
+        # 窗口总尺寸：中间悬浮球 + 左右对称的右键菜单展开区
+        self.win_w = self.orb_box + (self.menu_gap + self.menu_w) * 2
+        self.win_h = self.orb_box
+
+        # 悬浮球在窗口内的几何坐标
+        self.box_x0 = self.menu_w + self.menu_gap
+        self.box_y0 = 0
+        self.orb_x0 = self.box_x0 + self.glow_pad
+        self.orb_y0 = self.glow_pad
+        self.orb_cx = self.orb_x0 + self.orb_r
+        self.orb_cy = self.orb_y0 + self.orb_r
 
         # 右侧与左侧菜单胶囊矩形
         self.menu_y0 = self.orb_cy - self.menu_h // 2
@@ -394,12 +392,10 @@ class FloatingMicButton:
             self.menu_x0_left + self.menu_w,
             self.menu_y0 + self.menu_h,
         )
-        # 默认方向：'left'（因初始位置在屏幕右下角，中轴线右侧默认向左展开）
         self._menu_side = "left"
         self.menu_rect = self.menu_rect_left
 
-        self.f_menu = _load_font(int(round(12 * s)), bold=True)
-        self.f_rec = _load_font(int(round(9 * s)), bold=True)
+        self.f_menu = _load_font(int(round(12.5 * s)), bold=True)
 
         # 默认初始位置：主屏幕右下角偏上（避开右侧/底部任务栏与通知区）
         work = self._get_work_area(POINT(200, 200))
@@ -408,8 +404,249 @@ class FloatingMicButton:
             work.left - self.orb_x0 + 20,
             target_orb_right - (self.orb_x0 + self.orb_d),
         )
-        self.win_y = max(work.top + 40, work.bottom - self.win_h - int(round(140 * s)))
+        self.win_y = max(work.top + 40, work.bottom - self.win_h - int(round(130 * s)))
         self._update_menu_side()
+
+    def _build_assets(self) -> None:
+        """采用与 RecordingOverlay 完全一致的光学着色算法预渲染玻璃舱、柔和霓虹光晕与 3D 球心"""
+        s, ss = self.s, 4
+        B = self.orb_box
+        cx = cy = B / 2.0
+        R = self.orb_r
+
+        # 1. 外层毛玻璃圆舱蒙版 (orb_box x orb_box)
+        big_mask = Image.new("L", (B * ss, B * ss), 0)
+        ImageDraw.Draw(big_mask).ellipse(
+            ((cx - R) * ss, (cy - R) * ss, (cx + R) * ss - 1, (cy + R) * ss - 1),
+            fill=255,
+        )
+        self._shell_mask = big_mask.resize((B, B), Image.LANCZOS)
+
+        # 2. 外围柔和双色霓虹光晕（纯彩 RGB + Alpha 扩散，绝不产生黑灰暗边）
+        self._glow_idle = self._make_box_glow(ACCENT_C1, ACCENT_C2, blur_px=13.5 * s, boost=1.35)
+        self._glow_rec = self._make_box_glow(REC_C1, REC_C2, blur_px=14.5 * s, boost=1.55)
+
+        # 3. 3D 流体毛玻璃底座（深空半透明底 + 顶部曲面玻璃反光高光 + 渐变流光细描边）
+        self._glass_body_idle = self._make_glass_shell(ACCENT_C1, ACCENT_C2, border_alpha=115)
+        self._glass_body_hover = self._make_glass_shell(ACCENT_C1, ACCENT_C2, border_alpha=215)
+        self._glass_body_rec = self._make_glass_shell(REC_C1, REC_C2, border_alpha=225)
+
+        # 4. 内部 3D 渐变核心球（带顶部弧形高光 + 发光矢量图标）
+        self._core_idle = self._make_core_orb(ACCENT_C1, ACCENT_C2, is_recording=False)
+        self._core_rec = self._make_core_orb(REC_C1, REC_CORE_C2, is_recording=True)
+
+        # 5. 右键弹出胶囊菜单（预渲染常态与悬停态科幻毛玻璃胶囊）
+        self._menu_pill_idle = self._make_menu_pill(hovered=False)
+        self._menu_pill_hover = self._make_menu_pill(hovered=True)
+
+    def _make_box_glow(
+        self,
+        c1: Tuple[int, int, int],
+        c2: Tuple[int, int, int],
+        blur_px: float,
+        boost: float,
+    ) -> Image.Image:
+        """与 RecordingOverlay._make_glow 同源：纯彩渐变图套高斯模糊 Alpha，彻底消除灰边"""
+        B = self.orb_box
+        grad = _diag_grad(B, B, c1, c2)
+        spread = self._shell_mask.filter(ImageFilter.GaussianBlur(blur_px))
+        spread = spread.point(lambda v: min(255, int(v * boost)))
+        # 舱体内部减淡光晕，突出深邃毛玻璃质感
+        inner = self._shell_mask.point(lambda v: 255 - int(v * 0.72))
+        grad.putalpha(ImageChops.multiply(spread, inner))
+        return grad
+
+    def _make_glass_shell(
+        self,
+        c1: Tuple[int, int, int],
+        c2: Tuple[int, int, int],
+        border_alpha: int,
+    ) -> Image.Image:
+        """与 RecordingOverlay._make_body 同源：深空毛玻璃 + 顶部曲面反光 + 双色流光细描边"""
+        s, ss = self.s, 4
+        B = self.orb_box
+        cx = cy = B / 2.0
+        R = self.orb_r
+
+        body = Image.new("RGBA", (B, B), BODY_COLOR[:3] + (0,))
+        body.putalpha(
+            ImageChops.multiply(self._shell_mask, Image.new("L", (B, B), BODY_COLOR[3]))
+        )
+
+        # 顶部曲面玻璃高光 (Specular Sheen)
+        g = np.zeros((B, 1), np.float32)
+        top = cy - R
+        mid = top + (2 * R) * 0.56
+        ys = np.arange(B)
+        g[:, 0] = np.clip(1.0 - (ys - top) / max(1.0, (mid - top)), 0.0, 1.0) ** 1.6 * 34.0
+        sheen = Image.new("RGBA", (B, B), (255, 255, 255, 0))
+        sheen.putalpha(
+            ImageChops.multiply(
+                Image.fromarray(np.broadcast_to(g, (B, B)).astype(np.uint8), "L"),
+                self._shell_mask,
+            )
+        )
+        body = Image.alpha_composite(body, sheen)
+
+        # 双色流光抗锯齿细描边
+        ring_mask_big = Image.new("L", (B * ss, B * ss), 0)
+        ImageDraw.Draw(ring_mask_big).ellipse(
+            ((cx - R) * ss, (cy - R) * ss, (cx + R) * ss - 1, (cy + R) * ss - 1),
+            outline=border_alpha,
+            width=max(ss, int(round(1.35 * s * ss))),
+        )
+        ring_mask = ring_mask_big.resize((B, B), Image.LANCZOS)
+        ring_grad = _diag_grad(B, B, _mix(c1, (255, 255, 255), 0.25), c2)
+        ring_grad.putalpha(ring_mask)
+        return Image.alpha_composite(body, ring_grad)
+
+    def _make_core_orb(
+        self,
+        c1: Tuple[int, int, int],
+        c2: Tuple[int, int, int],
+        is_recording: bool,
+    ) -> Image.Image:
+        """与 RecordingOverlay._make_orb 完全同源的 3D 球心 + 顶部弧形高光 + 发光矢量图标"""
+        s, ss = self.s, 4
+        B = self.orb_box
+        box = B * ss
+        r = self.core_r * ss
+        c = box / 2.0
+
+        # 1. 对角线渐变球体
+        yy, xx = np.mgrid[0:box, 0:box].astype(np.float32)
+        t = np.clip(((xx - c + r) + (yy - c + r)) / max(1.0, (4.0 * r)), 0.0, 1.0)[..., None]
+        rgb = np.asarray(c1, np.float32) * (1.0 - t) + np.asarray(c2, np.float32) * t
+        arr = np.zeros((box, box, 4), np.uint8)
+        arr[..., :3] = rgb.astype(np.uint8)
+        mask = Image.new("L", (box, box), 0)
+        ImageDraw.Draw(mask).ellipse((c - r, c - r, c + r, c + r), fill=255)
+        arr[..., 3] = np.asarray(mask)
+        img = Image.fromarray(arr, "RGBA")
+
+        # 2. 顶部曲面高光 (3D 玻璃球质感核心)
+        hl = Image.new("RGBA", (box, box), (255, 255, 255, 0))
+        hm = Image.new("L", (box, box), 0)
+        ImageDraw.Draw(hm).ellipse(
+            (c - r * 0.72, c - r * 0.92, c + r * 0.72, c - r * 0.05),
+            fill=54,
+        )
+        hl.putalpha(ImageChops.multiply(hm.filter(ImageFilter.GaussianBlur(r * 0.12)), mask))
+        img = Image.alpha_composite(img, hl)
+
+        # 3. 中心矢量图标（带柔和白光辉光）
+        glyph_layer = Image.new("RGBA", (box, box), (0, 0, 0, 0))
+        d = ImageDraw.Draw(glyph_layer)
+        white = (255, 255, 255, 255)
+        lw = max(2, int(round(r * 0.105)))
+
+        if is_recording:
+            # 录音态：精致圆角正方形停止键 (⏹)
+            half = r * 0.36
+            rad = r * 0.115
+            d.rounded_rectangle(
+                (c - half, c - half, c + half, c + half),
+                radius=int(round(rad)),
+                fill=white,
+            )
+        else:
+            # 待机态：与 RecordingOverlay 完全一致的矢量麦克风
+            d.rounded_rectangle(
+                (c - r * 0.19, c - r * 0.56, c + r * 0.19, c + r * 0.12),
+                radius=r * 0.19,
+                fill=white,
+            )
+            d.arc(
+                (c - r * 0.37, c - r * 0.3, c + r * 0.37, c + r * 0.36),
+                start=0,
+                end=180,
+                fill=white,
+                width=lw,
+            )
+            d.rounded_rectangle(
+                (c - lw / 2, c + r * 0.34, c + lw / 2, c + r * 0.54),
+                radius=lw / 2,
+                fill=white,
+            )
+            d.rounded_rectangle(
+                (c - r * 0.22, c + r * 0.5, c + r * 0.22, c + r * 0.5 + lw),
+                radius=lw / 2,
+                fill=white,
+            )
+
+        glyph_small = glyph_layer.resize((B, B), Image.LANCZOS)
+        orb_small = img.resize((B, B), Image.LANCZOS)
+
+        # 为中心图标叠加一层微妙的科幻内发光
+        glow_a = glyph_small.getchannel("A").filter(ImageFilter.GaussianBlur(2.2 * s))
+        glow_a = glow_a.point(lambda v: int(v * 0.42))
+        glyph_glow = Image.new("RGBA", (B, B), (255, 255, 255, 0))
+        glyph_glow.putalpha(glow_a)
+        orb_small = Image.alpha_composite(orb_small, glyph_glow)
+        orb_small = Image.alpha_composite(orb_small, glyph_small)
+        return orb_small
+
+    def _make_menu_pill(self, hovered: bool) -> Image.Image:
+        """预渲染右键『× 隐藏悬浮球』科幻毛玻璃胶囊（带顶部高光与霓虹描边）"""
+        s, ss = self.s, 4
+        mw, mh = self.menu_w, self.menu_h
+        mask_big = Image.new("L", (mw * ss, mh * ss), 0)
+        ImageDraw.Draw(mask_big).rounded_rectangle(
+            (0, 0, mw * ss - 1, mh * ss - 1),
+            radius=(mh * ss) // 2,
+            fill=255,
+        )
+        mask = mask_big.resize((mw, mh), Image.LANCZOS)
+
+        bg_rgb = (22, 28, 46) if hovered else (14, 18, 30)
+        bg_alpha = 235 if hovered else 215
+        pill = Image.new("RGBA", (mw, mh), bg_rgb + (0,))
+        pill.putalpha(ImageChops.multiply(mask, Image.new("L", (mw, mh), bg_alpha)))
+
+        # 顶部玻璃高光
+        g = np.zeros((mh, 1), np.float32)
+        ys = np.arange(mh)
+        g[:, 0] = np.clip(1.0 - ys / max(1.0, mh * 0.55), 0.0, 1.0) ** 1.5 * 28.0
+        sheen = Image.new("RGBA", (mw, mh), (255, 255, 255, 0))
+        sheen.putalpha(
+            ImageChops.multiply(
+                Image.fromarray(np.broadcast_to(g, (mh, mw)).astype(np.uint8), "L"),
+                mask,
+            )
+        )
+        pill = Image.alpha_composite(pill, sheen)
+
+        # 渐变描边
+        bd_big = Image.new("L", (mw * ss, mh * ss), 0)
+        ImageDraw.Draw(bd_big).rounded_rectangle(
+            (0, 0, mw * ss - 1, mh * ss - 1),
+            radius=(mh * ss) // 2,
+            outline=220 if hovered else 95,
+            width=max(ss, int(round(1.2 * s * ss))),
+        )
+        bd_mask = bd_big.resize((mw, mh), Image.LANCZOS)
+        bd_grad = _diag_grad(mw, mh, REC_C1 if hovered else ACCENT_C1, REC_C2 if hovered else ACCENT_C2)
+        bd_grad.putalpha(bd_mask)
+        pill = Image.alpha_composite(pill, bd_grad)
+
+        # 绘制关闭图标与发光文字
+        d = ImageDraw.Draw(pill)
+        ix = int(round(17 * s))
+        iy = mh // 2
+        r_x = int(round(4 * s))
+        x_col = REC_C1 + (255,) if hovered else TEXT_SECONDARY + (235,)
+        stroke = max(1, int(round(1.8 * s)))
+        d.line((ix - r_x, iy - r_x, ix + r_x, iy + r_x), fill=x_col, width=stroke)
+        d.line((ix - r_x, iy + r_x, ix + r_x, iy - r_x), fill=x_col, width=stroke)
+        txt_col = TEXT_PRIMARY + (255,) if hovered else TEXT_SECONDARY + (245,)
+        d.text(
+            (ix + int(round(10 * s)), iy),
+            "隐藏悬浮球",
+            font=self.f_menu,
+            fill=txt_col,
+            anchor="lm",
+        )
+        return pill
 
     def _update_menu_side(self) -> str:
         """以当前显示器工作区中轴线为准：中轴线左侧向右展开，中轴线右侧向左展开"""
@@ -481,13 +718,26 @@ class FloatingMicButton:
         except Exception:
             return False
 
+    def _read_audio_level(self) -> float:
+        """读取实时麦克风声波能量（与 RecordingOverlay 同源联动）"""
+        try:
+            ov = getattr(self.app, "overlay", None)
+            if ov is not None:
+                raw = float(getattr(ov, "_level_in", 0.0))
+                target = _clamp((raw - 0.008) / 0.11) ** 0.65
+                k = 0.42 if target > self._lvl else 0.16
+                self._lvl += (target - self._lvl) * k
+                return self._lvl
+        except Exception:
+            pass
+        return 0.0
+
     def toggle_recording(self) -> None:
         """左键轻点悬浮按钮：未录音 -> 立即开始录音；录音中 -> 立即停止并输出结果"""
         if not self.app or not hasattr(self.app, "shortcut"):
             return
 
         if self._is_recording():
-            # 停止当前所有活跃的录音任务（无论是悬浮球启动还是键盘/鼠标按住启动）
             def _stop_all():
                 if self._task.is_recording:
                     self._task.finish()
@@ -497,7 +747,6 @@ class FloatingMicButton:
 
             self.app.shortcut._submit_action(_stop_all)
         else:
-            # 启动悬浮球免按住录音
             def _start_floating():
                 if not self._is_recording():
                     self._task.launch()
@@ -507,56 +756,7 @@ class FloatingMicButton:
         if self.hwnd:
             user32.PostMessageW(self.hwnd, WM_APP_REDRAW, 0, 0)
 
-    # ── 视觉渲染（4x 超采样抗锯齿）──────────────────────────────
-    def _draw_mic_or_stop_glyph(self, size: int, is_recording: bool) -> Image.Image:
-        scale = 4
-        S = size * scale
-        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        cx, cy = S / 2.0, S / 2.0
-        white = (255, 255, 255, 255)
-
-        if is_recording:
-            # 录音态：醒目的白色圆角正方形停止图标 (⏹)
-            half = S * 0.25
-            r = S * 0.08
-            d.rounded_rectangle(
-                (cx - half, cy - half, cx + half, cy + half),
-                radius=int(round(r)),
-                fill=white,
-            )
-        else:
-            # 待机态：精致矢量麦克风图标
-            stroke = max(2, int(round(S * 0.085)))
-            cap_w = S * 0.28
-            cap_h = S * 0.44
-            cap_top = cy - S * 0.34
-            d.rounded_rectangle(
-                (cx - cap_w / 2, cap_top, cx + cap_w / 2, cap_top + cap_h),
-                radius=int(round(cap_w / 2)),
-                fill=white,
-            )
-            arc_r = S * 0.25
-            arc_cy = cap_top + cap_h - S * 0.11
-            d.arc(
-                (cx - arc_r, arc_cy - arc_r, cx + arc_r, arc_cy + arc_r),
-                start=12,
-                end=168,
-                fill=white,
-                width=stroke,
-            )
-            stem_top = arc_cy + arc_r
-            stem_bot = cy + S * 0.34
-            d.line((cx, stem_top, cx, stem_bot), fill=white, width=stroke)
-            foot_w = S * 0.28
-            d.line(
-                (cx - foot_w / 2, stem_bot, cx + foot_w / 2, stem_bot),
-                fill=white,
-                width=stroke,
-            )
-
-        return img.resize((size, size), Image.LANCZOS)
-
+    # ── 视觉渲染（与 RecordingOverlay 同源科幻流体毛玻璃质感）──────
     def render_preview_frame(
         self,
         recording: Optional[bool] = None,
@@ -571,111 +771,107 @@ class FloatingMicButton:
         if menu_open is None:
             menu_open = self._menu_open
 
-        s = self.s
-        frame = Image.new("RGBA", (self.win_w, self.win_h), (0, 0, 0, 0))
-        cx, cy = self.orb_cx, self.orb_cy
-        orb_d = self.orb_d
+        s, ss = self.s, 3
+        B = self.orb_box
+        c = (B * ss) / 2.0
+        r_core = self.core_r * ss
 
-        # 1. 外围呼吸光晕 (Outer Aura Glow)
-        pulse = 0.5 + 0.5 * math.sin(now * (5.2 if recording else 2.2))
-        glow_layer = Image.new("RGBA", (self.win_w, self.win_h), (0, 0, 0, 0))
-        gd = ImageDraw.Draw(glow_layer)
+        # 实时声波与呼吸强度
+        lvl = self._read_audio_level() if recording else 0.0
+        breath = 0.5 + 0.5 * math.sin(now * (4.2 if recording else 2.2))
+        energy = max(lvl, 0.25 + 0.35 * breath) if recording else breath
+
+        box_frame = Image.new("RGBA", (B, B), (0, 0, 0, 0))
+
+        # 1. 外围柔和霓虹光晕（32*s 充裕留白，绝不触碰边界，纯彩 Alpha 无灰边）
         if recording:
-            glow_r = int(round(self.orb_r + (4 + 5 * pulse) * s))
-            glow_alpha = int(round(95 + 55 * pulse))
-            gd.ellipse(
-                (cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r),
-                fill=ROSE_C1 + (glow_alpha,),
-            )
+            glow_k = 0.68 + 0.32 * energy
+            box_frame.alpha_composite(_scale_alpha(self._glow_rec, glow_k))
         else:
-            glow_r = int(round(self.orb_r + (3 if self._hover_main else 1) * s))
-            glow_alpha = 85 if self._hover_main else 48
-            gd.ellipse(
-                (cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r),
-                fill=ACCENT_C1 + (glow_alpha,),
-            )
-        glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=5.5 * s))
-        frame.alpha_composite(glow_layer)
+            glow_k = (0.88 if self._hover_main else 0.52) + 0.12 * breath
+            box_frame.alpha_composite(_scale_alpha(self._glow_idle, glow_k))
 
-        # 2. 录音态扩散脉冲环 (Expanding Ripple Ring)
+        # 2. 3D 流体毛玻璃圆舱底座（深空玻璃 + 顶部曲面反光 + 渐变流光细描边）
         if recording:
-            ripple_phase = (now * 1.15) % 1.0
-            rip_d = int(round(orb_d + ripple_phase * 18 * s))
-            rip_alpha = int(round((1.0 - ripple_phase) * 155))
-            if rip_alpha > 8:
-                rip_big = Image.new("RGBA", (rip_d * 4, rip_d * 4), (0, 0, 0, 0))
-                ImageDraw.Draw(rip_big).ellipse(
-                    (2, 2, rip_d * 4 - 3, rip_d * 4 - 3),
-                    outline=ROSE_C1 + (rip_alpha,),
-                    width=max(4, int(round(6 * s))),
+            box_frame.alpha_composite(self._glass_body_rec)
+        elif self._hover_main:
+            box_frame.alpha_composite(self._glass_body_hover)
+        else:
+            box_frame.alpha_composite(self._glass_body_idle)
+
+        # 3. 舱内声波光晕环与双层流体扩散波纹（与 RecordingOverlay._render_orb 完全同源）
+        halo_big = Image.new("RGBA", (B * ss, B * ss), (0, 0, 0, 0))
+        hd = ImageDraw.Draw(halo_big)
+        if recording:
+            # 随音量起伏的内层贴身光环
+            rr = r_core + (2.5 + 6.5 * energy) * s * ss
+            hd.ellipse(
+                (c - rr, c - rr, c + rr, c + rr),
+                fill=REC_C1 + (int(42 + 95 * energy),),
+            )
+            # 周期性扩散波纹（限制在 R + 12*s 以内，远小于 B/2 = 61*s，绝对不会上下截断）
+            for offset in (0.0, 0.5):
+                ph = ((now / 1.6) + offset) % 1.0
+                rip_r = r_core + ph * 13.5 * s * ss
+                rip_col = _mix(REC_C1, REC_C2, ph)
+                rip_a = int(175 * ((1.0 - ph) ** 1.35))
+                if rip_a > 6:
+                    hd.ellipse(
+                        (c - rip_r, c - rip_r, c + rip_r, c + rip_r),
+                        outline=rip_col + (rip_a,),
+                        width=max(2, int(round(1.6 * s * ss))),
+                    )
+        else:
+            # 待机态：柔和的呼吸内光环 + 悬停旋转流光弧
+            rr = r_core + (3.2 + (1.8 if self._hover_main else 0.8) * breath) * s * ss
+            hd.ellipse(
+                (c - rr, c - rr, c + rr, c + rr),
+                fill=ACCENT_C1 + (int((68 if self._hover_main else 42) + 20 * breath),),
+            )
+            if self._hover_main:
+                arc_r = (self.orb_r - 3.5 * s) * ss
+                start = (now * 140) % 360
+                hd.arc(
+                    (c - arc_r, c - arc_r, c + arc_r, c + arc_r),
+                    start,
+                    start + 95,
+                    fill=ACCENT_C1 + (185,),
+                    width=max(2, int(round(1.5 * s * ss))),
                 )
-                rip_img = rip_big.resize((rip_d, rip_d), Image.LANCZOS)
-                frame.alpha_composite(rip_img, (cx - rip_d // 2, cy - rip_d // 2))
+                hd.arc(
+                    (c - arc_r, c - arc_r, c + arc_r, c + arc_r),
+                    start + 180,
+                    start + 275,
+                    fill=ACCENT_C2 + (165,),
+                    width=max(2, int(round(1.5 * s * ss))),
+                )
 
-        # 3. 深空毛玻璃外环底座 (Frosted Dark Glass Shell)
-        shell_big = Image.new("RGBA", (orb_d * 4, orb_d * 4), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shell_big)
-        border_col = (
-            ROSE_C1 + (235,)
-            if recording
-            else (
-                ACCENT_C1 + (220,)
-                if self._hover_main
-                else (255, 255, 255, 65)
-            )
-        )
-        sd.ellipse(
-            (2, 2, orb_d * 4 - 3, orb_d * 4 - 3),
-            fill=BG_GLASS + (242,),
-            outline=border_col,
-            width=max(4, int(round(5.5 * s))),
-        )
-        shell_img = shell_big.resize((orb_d, orb_d), Image.LANCZOS)
-        frame.alpha_composite(shell_img, (self.orb_x0, self.orb_y0))
+        box_frame.alpha_composite(halo_big.resize((B, B), Image.LANCZOS))
 
-        # 4. 内部渐变核心球 (Gradient Inner Orb)
-        inner_pad = int(round((6 if not self._pressed_main else 8) * s))
-        inner_d = orb_d - inner_pad * 2
-        if recording:
-            c1 = _mix(ROSE_C1, (255, 160, 175), 0.25 * pulse)
-            c2 = ROSE_C2
-        else:
-            c1 = _mix(ACCENT_C1, (125, 211, 252), 0.25 if self._hover_main else 0.0)
-            c2 = _mix(ACCENT_C2, (167, 139, 250), 0.25 if self._hover_main else 0.0)
-        core_img = _draw_grad_circle(inner_d, c1, c2, 245)
-        frame.alpha_composite(core_img, (cx - inner_d // 2, cy - inner_d // 2))
+        # 4. 内部 3D 渐变核心球（录音时随声波轻微呼吸缩放，按压时微缩反馈）
+        core = self._core_rec if recording else self._core_idle
+        scale_k = 0.93 if self._pressed_main else (1.0 + 0.055 * energy if recording else 1.0)
+        if abs(scale_k - 1.0) > 0.005:
+            sz = int(round(B * scale_k)) | 1
+            big_core = core.resize((sz, sz), Image.BICUBIC)
+            off = (B - sz) // 2
+            scaled = Image.new("RGBA", (B, B), (0, 0, 0, 0))
+            if off < 0:
+                scaled.alpha_composite(big_core.crop((-off, -off, -off + B, -off + B)), (0, 0))
+            else:
+                scaled.alpha_composite(big_core, (off, off))
+            core = scaled
+        box_frame.alpha_composite(core)
 
-        # 5. 中心图标：待机麦克风 vs 录音红色方块停止键 (⏹)
-        ico_sz = int(round(24 * s))
-        glyph = self._draw_mic_or_stop_glyph(ico_sz, is_recording=recording)
-        frame.alpha_composite(glyph, (cx - ico_sz // 2, cy - ico_sz // 2))
+        # 5. 合成到总窗口画布，并在需要时绘制左右自适应右键胶囊菜单
+        frame = Image.new("RGBA", (self.win_w, self.win_h), (0, 0, 0, 0))
+        frame.alpha_composite(box_frame, (self.box_x0, self.box_y0))
 
-        # 6. 右键弹出胶囊菜单：[× 隐藏悬浮球]（根据屏幕中轴线自动向左或向右展开）
         if menu_open:
             self._update_menu_side()
-            mx0, my0, mx1, my1 = self.menu_rect
-            mw, mh = mx1 - mx0, my1 - my0
-            bg_col = (30, 38, 58, 245) if self._hover_menu else (18, 23, 38, 240)
-            bd_col = ROSE_C1 + (210,) if self._hover_menu else (255, 255, 255, 70)
-            pill = _draw_rr((mw, mh), mh / 2, fill=bg_col, outline=bd_col, width=1)
+            mx0, my0, _, _ = self.menu_rect
+            pill = self._menu_pill_hover if self._hover_menu else self._menu_pill_idle
             frame.alpha_composite(pill, (mx0, my0))
-
-            d = ImageDraw.Draw(frame)
-            # 绘制小型关闭叉号 + “隐藏悬浮球”文字
-            ix = mx0 + int(round(16 * s))
-            iy = my0 + mh // 2
-            r_x = int(round(4 * s))
-            x_col = ROSE_C1 + (255,) if self._hover_menu else TEXT_SECONDARY + (235,)
-            d.line((ix - r_x, iy - r_x, ix + r_x, iy + r_x), fill=x_col, width=max(1, int(round(1.8 * s))))
-            d.line((ix - r_x, iy + r_x, ix + r_x, iy - r_x), fill=x_col, width=max(1, int(round(1.8 * s))))
-            txt_col = TEXT_PRIMARY + (255,) if self._hover_menu else TEXT_SECONDARY + (245,)
-            d.text(
-                (ix + int(round(10 * s)), iy),
-                "隐藏悬浮球",
-                font=self.f_menu,
-                fill=txt_col,
-                anchor="lm",
-            )
 
         return frame
 
@@ -684,7 +880,6 @@ class FloatingMicButton:
             return
         frame = self.render_preview_frame()
         w, h = frame.size
-        raw_bgra = frame.tobytes("raw", "BGRA")
 
         hdc_screen = user32.GetDC(0)
         hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
@@ -703,17 +898,13 @@ class FloatingMicButton:
         )
         if hbm and ppv_bits.value:
             old_bm = gdi32.SelectObject(hdc_mem, hbm)
-            # 预乘 Alpha
-            arr = bytearray(raw_bgra)
-            for i in range(0, len(arr), 4):
-                a = arr[i + 3]
-                if a == 0:
-                    arr[i] = arr[i + 1] = arr[i + 2] = 0
-                elif a < 255:
-                    arr[i] = (arr[i] * a) // 255
-                    arr[i + 1] = (arr[i + 1] * a) // 255
-                    arr[i + 2] = (arr[i + 2] * a) // 255
-            ctypes.memmove(ppv_bits.value, bytes(arr), len(arr))
+            # 使用与 RecordingOverlay._LayeredSurface.present 完全一致的 NumPy 精确四舍五入预乘 BGRA
+            arr = np.asarray(frame, dtype=np.uint8)
+            a = arr[..., 3:4].astype(np.uint16)
+            buf = np.empty((h, w, 4), np.uint8)
+            buf[..., :3] = (arr[..., 2::-1].astype(np.uint16) * a + 127) // 255
+            buf[..., 3] = arr[..., 3]
+            ctypes.memmove(ppv_bits.value, buf.ctypes.data, buf.nbytes)
 
             pt_dst = POINT(int(self.win_x), int(self.win_y))
             sz = SIZE(w, h)
@@ -781,8 +972,8 @@ class FloatingMicButton:
             logger.warning("创建桌面悬浮语音按钮窗口失败")
             return
 
-        # 30fps 轻量定时器：同步外部按键录音状态并驱动录音态呼吸脉冲动画
-        user32.SetTimer(self.hwnd, TIMER_PULSE, 40, None)
+        # 30fps 定时器：同步外部按键录音状态并驱动丝滑声波呼吸与波纹动画
+        user32.SetTimer(self.hwnd, TIMER_PULSE, 33, None)
 
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -849,14 +1040,13 @@ class FloatingMicButton:
                     user32.GetCursorPos(ctypes.byref(pt))
                     lx = int(pt.x - self.win_x)
                     ly = int(pt.y - self.win_y)
-                    # 只有左键点在“隐藏悬浮球”胶囊上才保留给 WM_LBUTTONDOWN 执行隐藏；其余任何空白点击（含左键/右键/中键）均立即收起该右键选项
                     if not (l_down and self._hit_menu_pill(lx, ly)) and not self._hit_main_orb(lx, ly):
                         self._menu_open = False
                         self._hover_menu = False
                         self._present()
                         return 0
             rec = self._is_recording()
-            if rec or rec != self._last_recording_state:
+            if rec or self._hover_main or rec != self._last_recording_state:
                 self._last_recording_state = rec
                 self._present()
             return 0
@@ -912,7 +1102,6 @@ class FloatingMicButton:
             lx = ctypes.c_short(lparam & 0xFFFF).value
             ly = ctypes.c_short((lparam >> 16) & 0xFFFF).value
             if self._hit_menu_pill(lx, ly):
-                # 点击了右键菜单的“隐藏悬浮球”
                 self._menu_open = False
                 self.hide()
                 if self.on_user_hide:
