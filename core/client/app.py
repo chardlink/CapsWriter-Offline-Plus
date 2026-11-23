@@ -40,6 +40,26 @@ from platform import system
 
 
 
+def _disable_console_quick_edit() -> None:
+    """禁用 Windows 控制台快速编辑模式，防止用户误点黑窗口进入选择暂停态导致主进程/日志打印卡死"""
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32')
+        h_in = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        if not h_in or h_in == -1:
+            return
+        mode = wintypes.DWORD()
+        if kernel32.GetConsoleMode(h_in, ctypes.byref(mode)):
+            # 清除 ENABLE_QUICK_EDIT_MODE(0x40) 和 ENABLE_INSERT_MODE(0x20)，设置 ENABLE_EXTENDED_FLAGS(0x80)
+            new_mode = (mode.value & ~0x0060) | 0x0080
+            kernel32.SetConsoleMode(h_in, new_mode)
+    except Exception:
+        pass
+
+
 class CapsWriterClient:
     """
     CapsWriter 客户端门面类
@@ -47,6 +67,7 @@ class CapsWriterClient:
     管理的外部接口简洁：start()。
     """
     def __init__(self):
+        _disable_console_quick_edit()
         # 确保正确的工作目录
         self.base_dir = Path(__file__).parents[2]
         os.chdir(self.base_dir)
@@ -185,7 +206,10 @@ class CapsWriterClient:
                 logger.warning(f"停止内置服务端时发生错误: {e}")
 
         # 6. 停止事件循环（最后一步，确保前面的异步操作已调度）
-        self.loop.stop()
+        try:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        except Exception:
+            pass
 
         logger.info("资源释放完成")
         console.print('[green4]再见！')

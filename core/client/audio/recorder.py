@@ -69,25 +69,23 @@ class AudioRecorder:
         return self.app.ws
     
     async def _send_message(self, message: AudioMessage) -> None:
-        """发送消息到服务端"""
-        if not self._ws_manager.is_connected:
-            if message.is_final:
-                self.state.pop_audio_file(message.task_id)
-                console.print('    服务端未连接，无法发送\n')
-                logger.warning("服务端未连接，无法发送音频数据")
-                self.app.overlay.error(message.time_start, '服务端未连接')
-            return
-        
-        # 使用 WebSocketManager 发送协议消息
-        success = await self._ws_manager.send(message)
+        """发送消息到服务端（若连接闲置断开则自动尝试重连）"""
+        try:
+            success = await self._ws_manager.send(message)
+        except Exception as e:
+            logger.warning(f"发送音频消息异常: {e}")
+            success = False
+
         if not success and message.is_final:
             self.state.pop_audio_file(message.task_id)
-            # 具体错误日志由 WebSocketManager 记录
+            console.print('    服务端未连接，无法发送\n')
+            logger.warning("服务端未连接，无法发送音频数据")
+            self.app.overlay.error(message.time_start, '服务端未连接')
 
     async def _send_preview(self, audio: bytes) -> None:
         """在独立连接上识别最近一段音频，不改变正式录音的拼接结果。"""
         message = AudioMessage(
-            task_id=str(uuid.uuid4()), source='mic',
+            task_id=f'preview_{uuid.uuid4()}', source='mic',
             data=base64.b64encode(audio).decode('ascii'), is_final=True,
             time_start=self._start_time, context=Config.context,
             language=Config.language,

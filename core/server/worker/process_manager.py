@@ -43,13 +43,25 @@ class ProcessManager:
         # 1. 前置检查
         check_model()
 
-        # 2. 初始化共享资源
-        # 使用 Manager 管理共享列表，用于追踪活动连接
+        # 2. 初始化或同步共享资源
+        # 使用 Manager 管理共享列表，用于追踪活动连接；重启引擎时必须保留已连接的客户端 ID
         state = self.app.state
-        state.sockets_id = Manager().list()
+        if hasattr(state, 'worker_ready'):
+            state.worker_ready.clear()
+        active_ids = list(state.sockets.keys())
+        if state.sockets_id is None:
+            state.sockets_id = Manager().list(active_ids)
+        else:
+            try:
+                state.sockets_id[:] = active_ids
+            except Exception:
+                state.sockets_id = Manager().list(active_ids)
         
         # 获取标准输入文件描述符，用于 Windows 下的信号传递补丁
-        stdin_fn = sys.stdin.fileno()
+        try:
+            stdin_fn = sys.stdin.fileno() if sys.stdin is not None else None
+        except Exception:
+            stdin_fn = None
         
         # 3. 创建并启动进程
         self._process = Process(
@@ -72,15 +84,27 @@ class ProcessManager:
         return self._process
 
     def _wait_for_models(self):
-        """轮询队列直到收到模型加载成功 (True) 或发生错误"""
+        """轮询直到收到模型加载成功 (True) 或发生错误"""
         logger.info("正在等待子进程加载模型...")
-        
+        state = self.app.state
+        ws_running = bool(getattr(self.app, 'socket_manager', None) and self.app.socket_manager._is_running)
+
         while self.is_alive:
+            if ws_running and hasattr(state, 'worker_ready'):
+                # WebSocket 发送协程已在运行，由 ws_send 消费 queue_out 并触发 worker_ready，避免抢队列
+                if state.worker_ready.wait(timeout=0.1):
+                    break
+                if self._process and not self._process.is_alive():
+                    self._handle_unexpected_exit()
+                    return
+                continue
+
             try:
                 # 阻塞最多 100ms
-                status = self.app.state.queue_out.get(timeout=0.1)
+                status = state.queue_out.get(timeout=0.1)
                 if status is True:
-                    # 收到 True 说明模型加载成功
+                    if hasattr(state, 'worker_ready'):
+                        state.worker_ready.set()
                     break
             except (queue.Empty, OSError):
                 if self._process and not self._process.is_alive():

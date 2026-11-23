@@ -472,25 +472,32 @@ class _TraySystem:
             time.sleep(0.2)
 
     def on_restart(self, icon, item) -> None:
-        """托盘重启处理：启动新进程后退出当前进程"""
+        """托盘重启处理：先释放当前进程端口与子进程资源，再拉起独立新进程并立即退出"""
         logger.info("托盘重启: 用户点击重启菜单，准备重启程序")
-        try:
-            if getattr(sys, 'frozen', False):
-                cmd = sys.argv
-            else:
-                cmd = [sys.executable] + sys.argv
-            subprocess.Popen(cmd)
-        except Exception as e:
-            logger.error(f"重启失败: {e}")
-            return
+        self.should_exit = True
 
-        # 启动新进程成功后，调用退出回调退出当前进程
+        # 1. 先执行退出回调，确保端口 6016、音频流与识别子进程已释放
         exit_callback = _get_exit_callback()
         if exit_callback:
             try:
                 exit_callback()
             except Exception as e:
                 logger.error(f"重启时调用退出回调发生错误: {e}")
+
+        # 2. 启动全新进程（使用独立控制台，避免继承已被暂停或正在销毁的旧控制台句柄）
+        try:
+            if getattr(sys, 'frozen', False):
+                cmd = sys.argv
+            else:
+                cmd = [sys.executable] + sys.argv
+            flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0) if platform.system() == 'Windows' else 0
+            subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+        except Exception as e:
+            logger.error(f"重启拉起新进程失败: {e}")
+            return
+
+        # 3. 强制终止当前旧进程，避免后台残留线程占用资源
+        os._exit(0)
 
     def on_exit(self, icon, item) -> None:
         """托盘退出处理"""

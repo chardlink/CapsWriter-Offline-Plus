@@ -34,8 +34,34 @@ class ShortcutEventHandler:
         """处理按键按下事件"""
         # 长按模式
         if task.shortcut.hold_mode:
-            if not task.is_recording:
-                task.launch()
+            now = time.time()
+            # 若其他快捷键存在遗留未释放的录音会话，先清理避免共用 queue_in 冲突
+            for other_key, other_task in list(self.tasks.items()):
+                if other_task is not task and getattr(other_task, 'is_recording', False):
+                    logger.warning(f"[{other_key}] 检测到跨键遗留录音状态，自动清理")
+                    other_task.cancel()
+
+            if task.is_recording:
+                prev_kd = getattr(task, 'last_keydown_time', 0.0) or task.recording_start_time
+                gap = now - prev_kd
+                task.last_keydown_time = now
+                is_mouse_new_press = (
+                    task.shortcut.type == 'mouse'
+                    and not getattr(task, '_in_bounce_recovery', False)
+                    and (now - task.recording_start_time) > 0.4
+                )
+                is_kbd_stale = (
+                    task.shortcut.type == 'keyboard'
+                    and gap > 1.2
+                )
+                if is_mouse_new_press or is_kbd_stale:
+                    logger.warning(f"[{key_name}] 检测到前次松开事件丢失 (gap={gap:.2f}s)，自动重置并重新启动录音")
+                    task.cancel()
+                    task.launch()
+                return
+
+            task.last_keydown_time = now
+            task.launch()
             return
 
         # 单击模式

@@ -25,6 +25,17 @@ class CapsWriterServer:
     管理的外部接口极其简洁：start()。
     """
     def __init__(self, manage_tray: bool = True, register_signals: bool = True):
+        if os.name == 'nt':
+            try:
+                import ctypes
+                from ctypes import wintypes
+                k32 = ctypes.WinDLL('kernel32')
+                h_in = k32.GetStdHandle(-10)
+                mode = wintypes.DWORD()
+                if h_in and h_in != -1 and k32.GetConsoleMode(h_in, ctypes.byref(mode)):
+                    k32.SetConsoleMode(h_in, (mode.value & ~0x0060) | 0x0080)
+            except Exception:
+                pass
         # 确保正确的工作目录
         self.base_dir = Path(__file__).parents[2]
         os.chdir(self.base_dir)
@@ -82,7 +93,10 @@ class CapsWriterServer:
             self.tray_manager.stop()
 
         # 4. 最后停止协程（需在其他资源释放之后）
-        self.loop.stop()
+        try:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        except Exception:
+            pass
 
         logger.info("服务端资源清理完成")
         console.print('[green4]再见！')
@@ -96,6 +110,13 @@ class CapsWriterServer:
             logger.info("正在重启服务端识别引擎...")
             console.print('\n[yellow]正在重启服务端识别引擎...[/yellow]')
             self.process_manager.stop()
+            # 排空旧子进程可能残留在 queue_in / queue_out 中的旧数据
+            for q in (self.state.queue_in, self.state.queue_out):
+                while True:
+                    try:
+                        q.get_nowait()
+                    except Exception:
+                        break
             self.process_manager.start()
             logger.info("服务端识别引擎重启完成")
             console.print('[bold green]✓ 服务端识别引擎重启完成[/bold green]\n')

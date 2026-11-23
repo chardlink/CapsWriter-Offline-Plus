@@ -28,6 +28,12 @@ async def ws_send(app):
                 logger.info("收到退出通知，停止发送任务")
                 return
 
+            # 子进程重启加载模型完成信号（避免被 ws_send 误消费导致 AttributeError）
+            if result is True:
+                if hasattr(state, 'worker_ready'):
+                    state.worker_ready.set()
+                continue
+
             # 1. 将内部 Result 转换为标准的协议消息对象
             msg = RecognitionMessage(
                 task_id=result.task_id,
@@ -49,7 +55,10 @@ async def ws_send(app):
             )
 
             if not websocket:
-                logger.warning(f"客户端 {result.socket_id} 不存在，跳过发送结果，任务ID: {result.task_id}")
+                if str(getattr(result, 'task_id', '')).startswith('preview_'):
+                    logger.debug(f"预览连接 {result.socket_id} 已关闭，跳过发送预览结果")
+                else:
+                    logger.warning(f"客户端 {result.socket_id} 不存在，跳过发送结果，任务ID: {result.task_id}")
                 continue
 
             # 发送消息

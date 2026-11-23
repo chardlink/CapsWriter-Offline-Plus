@@ -86,7 +86,7 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
 
         if not msg.is_final:
             # 打印状态消息
-            if msg.source == 'mic':
+            if msg.source == 'mic' and not str(msg.task_id).startswith('preview_'):
                 status_mic.start()
             if msg.source == 'file' and is_start:
                 console.print('正在接收音频文件...')
@@ -121,8 +121,8 @@ async def message_handler(websocket, msg: AudioMessage, cache: AudioCache, app) 
                 )
 
         else:  # is_final
-            # 打印状态消息
-            if msg.source == 'mic':
+            # 打印状态消息（预览请求不打断主录音的接收动画）
+            if msg.source == 'mic' and not str(msg.task_id).startswith('preview_'):
                 status_mic.stop()
             elif msg.source == 'file':
                 print(f'音频文件接收完毕，时长 {cache.total_duration:.2f}s')
@@ -166,14 +166,20 @@ async def ws_recv(websocket, app) -> None:
     sockets = state.sockets
     sockets_id = state.sockets_id
     socket_id = str(websocket.id)
+    is_secondary = len(sockets) > 0
     sockets[socket_id] = websocket
-    sockets_id.append(socket_id)
+    if socket_id not in sockets_id:
+        sockets_id.append(socket_id)
     remote = websocket.remote_address
-    console.print(f'[bold green]客户端已连接: {remote[0]}:{remote[1]}[/bold green]\n')
-    logger.info(f"新客户端连接: {websocket}, ID: {socket_id}")
+    if not is_secondary:
+        console.print(f'[bold green]客户端已连接: {remote[0]}:{remote[1]}[/bold green]\n')
+        logger.info(f"新客户端连接: {websocket}, ID: {socket_id}")
+    else:
+        logger.debug(f"辅助预览连接已建立: {socket_id}")
 
     # 创建音频缓冲区
     cache = AudioCache()
+    saw_Only_preview = True
 
     # 接收并处理消息
     try:
@@ -182,17 +188,23 @@ async def ws_recv(websocket, app) -> None:
             try:
                 data = json.loads(raw_message)
                 msg = AudioMessage.from_dict(data)
+                if not str(msg.task_id).startswith('preview_'):
+                    saw_Only_preview = False
                 # 处理音频数据
                 await message_handler(websocket, msg, cache, app)
             except Exception as e:
                 logger.error(f"消息解析失败: {str(e)}")
                 continue
 
-        logger.info(f"客户端正常关闭连接: {socket_id}")
+        if not is_secondary or not saw_Only_preview:
+            logger.info(f"客户端正常关闭连接: {socket_id}")
+        else:
+            logger.debug(f"辅助预览连接已关闭: {socket_id}")
 
     except websockets.ConnectionClosed:
-        console.print("ConnectionClosed...")
-        logger.warning(f"客户端连接已关闭: {socket_id}")
+        if not is_secondary:
+            console.print("ConnectionClosed...")
+            logger.warning(f"客户端连接已关闭: {socket_id}")
     except websockets.InvalidState:
         console.print("InvalidState...")
         logger.error(f"WebSocket 状态异常: {socket_id}")
@@ -201,14 +213,15 @@ async def ws_recv(websocket, app) -> None:
         logger.error(f"WebSocket 接收异常，客户端ID {socket_id}: {e}", exc_info=True)
     finally:
         # 清理资源
-        status_mic.stop()
-        status_mic.on = False
         sockets.pop(socket_id, None)
-        if socket_id in sockets_id:
-            sockets_id.remove(socket_id)
+        try:
+            while socket_id in sockets_id:
+                sockets_id.remove(socket_id)
+        except Exception:
+            pass
 
-        console.print(f'[bold red]客户端已断开: {remote[0]}:{remote[1]}[/bold red]\n')
-
-        # 注意：session 清理由 TaskHandler 在子进程中定期执行
-        # （通过检查 sockets_id 判断客户端是否已断开）
-        logger.debug(f"客户端资源已清理: {socket_id}")
+        if not is_secondary or not saw_Only_preview:
+            status_mic.stop()
+            status_mic.on = False
+            console.print(f'[bold red]客户端已断开: {remote[0]}:{remote[1]}[/bold red]\n')
+            logger.debug(f"客户端资源已清理: {socket_id}")

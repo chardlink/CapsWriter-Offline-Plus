@@ -211,6 +211,7 @@ class ShortcutManager:
             ):
                 self._submit_action(task.ensure_overlay_shown, task.recording_start_time)
 
+        task._in_bounce_recovery = bool(cancelled_pending)
         self._submit_action(self._event_handler.handle_keydown, button_name, task)
 
     def _on_mouse_keyup(self, button_name: str, task) -> None:
@@ -342,29 +343,8 @@ class ShortcutManager:
     # ========== 公共接口 ==========
 
     def start(self) -> None:
-        """启动所有监听器"""
-        has_keyboard = any(s.type == 'keyboard' for s in self.shortcuts if s.enabled)
-        has_mouse = any(s.type == 'mouse' for s in self.shortcuts if s.enabled)
-
-        if has_keyboard:
-            if self.keyboard_listener and self.keyboard_listener.is_alive():
-                logger.debug("键盘监听器已在运行，跳过启动")
-            else:
-                self.keyboard_listener = keyboard.Listener(
-                    win32_event_filter=self.create_keyboard_filter()
-                )
-                self.keyboard_listener.start()
-                logger.info("键盘监听器已启动")
-
-        if has_mouse:
-            if self.mouse_listener and self.mouse_listener.is_alive():
-                logger.debug("鼠标监听器已在运行，跳过启动")
-            else:
-                self.mouse_listener = mouse.Listener(
-                    win32_event_filter=self.create_mouse_filter()
-                )
-                self.mouse_listener.start()
-                logger.info("鼠标监听器已启动")
+        """启动所有监听器与后台自愈守护线程"""
+        self._ensure_listeners(log_startup=True)
 
         # 打印所有启用的快捷键
         for shortcut in self.shortcuts:
@@ -373,8 +353,121 @@ class ShortcutManager:
                 toggle = "可恢复" if shortcut.is_toggle_key() else "普通键"
                 logger.info(f"  [{shortcut.key}] {mode}模式, 阻塞:{shortcut.suppress}, {toggle}")
 
+        # 启动长时运行自愈守护线程（处理休眠唤醒、钩子掉线与超时僵尸录音）
+        if not hasattr(self, '_watchdog_stop') or self._watchdog_stop is None:
+            self._watchdog_stop = threading.Event()
+        else:
+            self._watchdog_stop.clear()
+        if not getattr(self, '_watchdog_thread', None) or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop,
+                daemon=True,
+                name="ShortcutWatchdog",
+            )
+            self._watchdog_thread.start()
+
+    def _ensure_listeners(self, log_startup: bool = False, force_recreate: bool = False) -> None:
+        """确保键盘与鼠标底层钩子监听器处于活跃状态"""
+        has_keyboard = any(s.type == 'keyboard' for s in self.shortcuts if s.enabled)
+        has_mouse = any(s.type == 'mouse' for s in self.shortcuts if s.enabled)
+
+        if has_keyboard:
+            if force_recreate and self.keyboard_listener:
+                try:
+                    self.keyboard_listener.stop()
+                except Exception:
+                    pass
+                self.keyboard_listener = None
+
+            if self.keyboard_listener and self.keyboard_listener.is_alive():
+                if log_startup:
+                    logger.debug("键盘监听器已在运行，跳过启动")
+            else:
+                self.keyboard_listener = keyboard.Listener(
+                    win32_event_filter=self.create_keyboard_filter()
+                )
+                self.keyboard_listener.start()
+                if log_startup:
+                    logger.info("键盘监听器已启动")
+                else:
+                    logger.info("键盘监听器已自动重挂恢复")
+
+        if has_mouse:
+            if force_recreate and self.mouse_listener:
+                try:
+                    self.mouse_listener.stop()
+                except Exception:
+                    pass
+                self.mouse_listener = None
+
+            if self.mouse_listener and self.mouse_listener.is_alive():
+                if log_startup:
+                    logger.debug("鼠标监听器已在运行，跳过启动")
+            else:
+                self.mouse_listener = mouse.Listener(
+                    win32_event_filter=self.create_mouse_filter()
+                )
+                self.mouse_listener.start()
+                if log_startup:
+                    logger.info("鼠标监听器已启动")
+                else:
+                    logger.info("鼠标监听器已自动重挂恢复")
+
+    def _watchdog_loop(self) -> None:
+        """后台守护循环：检测系统休眠唤醒、钩子线程意外失效与超长卡死录音"""
+        last_mono = time.monotonic()
+        last_refresh = last_mono
+        while not self._watchdog_stop.wait(timeout=2.0):
+            try:
+                mono_now = time.monotonic()
+                dt = mono_now - last_mono
+                last_mono = mono_now
+                now = time.time()
+
+                # 1. 兜底清理超过 300 秒因松开事件丢失而悬空的录音任务
+                for key_name, task in list(self.tasks.items()):
+                    if task.is_recording and (now - task.recording_start_time) > 300.0:
+                        logger.warning(f"[{key_name}] 录音持续超过 300s，疑似松开事件丢失，自动取消复位")
+                        self._submit_action(task.cancel)
+
+                any_recording = any(t.is_recording for t in self.tasks.values())
+                has_kbd = any(s.type == 'keyboard' and s.enabled for s in self.shortcuts)
+                has_mouse = any(s.type == 'mouse' and s.enabled for s in self.shortcuts)
+                kbd_dead = has_kbd and (self.keyboard_listener is None or not self.keyboard_listener.is_alive())
+                mouse_dead = has_mouse and (self.mouse_listener is None or not self.mouse_listener.is_alive())
+
+                # 2. 任一监听线程退出时立即重挂
+                if kbd_dead or mouse_dead:
+                    logger.warning("检测到快捷键监听线程意外退出，正在自动恢复...")
+                    self._ensure_listeners(log_startup=False, force_recreate=False)
+                    last_refresh = mono_now
+                    continue
+
+                # 3. 系统从睡眠/现代待机唤醒（时间跳变 > 12s）或空闲满 30 分钟时，在非录音状态下静默刷新底层钩子
+                woke_from_sleep = dt > 12.0
+                periodic_idle = (mono_now - last_refresh) > 1800.0
+                if not any_recording and (woke_from_sleep or periodic_idle):
+                    if woke_from_sleep:
+                        logger.info(f"检测到系统休眠/待机唤醒 (间隔 {dt:.1f}s)，正在刷新快捷键钩子与音频流...")
+                    else:
+                        logger.debug("执行定期空闲快捷键底层钩子刷新")
+                    self._ensure_listeners(log_startup=False, force_recreate=True)
+                    last_refresh = mono_now
+                    if woke_from_sleep:
+                        stream_mgr = getattr(self.app, 'stream', None)
+                        if stream_mgr and hasattr(stream_mgr, 'reopen'):
+                            try:
+                                stream_mgr.reopen()
+                            except Exception as e:
+                                logger.debug(f"唤醒后重开音频流失败: {e}")
+            except Exception as e:
+                logger.debug(f"快捷键守护线程检查异常: {e}")
+
     def stop(self) -> None:
         """停止所有监听器和清理资源"""
+        if hasattr(self, '_watchdog_stop') and self._watchdog_stop is not None:
+            self._watchdog_stop.set()
+
         if self.keyboard_listener:
             try:
                 self.keyboard_listener.stop()

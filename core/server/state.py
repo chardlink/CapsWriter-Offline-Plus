@@ -6,6 +6,7 @@
 """
 
 from __future__ import annotations
+import threading
 from dataclasses import dataclass, field
 from multiprocessing import Queue, Process
 from multiprocessing.managers import ListProxy
@@ -47,8 +48,9 @@ class ServerState:
     queue_in: Queue = field(default_factory=Queue)
     queue_out: Queue = field(default_factory=Queue)
 
-    # 识别子进程
+    # 识别子进程与模型就绪事件
     recognize_process: Optional[Process] = None
+    worker_ready: threading.Event = field(default_factory=threading.Event)
 
 
 

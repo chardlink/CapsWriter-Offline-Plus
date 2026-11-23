@@ -54,6 +54,8 @@ class ShortcutTask:
         self.threshold: float = 0.3
         self.pending_release: bool = False
         self.overlay_shown: bool = False
+        self.last_keydown_time: float = 0.0
+        self._in_bounce_recovery: bool = False
         self._overlay_lock: Lock = Lock()
         self._overlay_timer: Optional[Timer] = None
 
@@ -107,12 +109,22 @@ class ShortcutTask:
         # 记录开始时间并复位浮窗状态
         with self._overlay_lock:
             self.recording_start_time = time.time()
+            self.last_keydown_time = self.recording_start_time
             self.is_recording = True
             self.pending_release = False
+            self._in_bounce_recovery = False
             self.overlay_shown = False
             if self._overlay_timer is not None:
                 self._overlay_timer.cancel()
                 self._overlay_timer = None
+
+        # 若上一次协程尚未结束，先取消避免共用 queue_in 串线
+        if self.task is not None and not self.task.done():
+            try:
+                self.task.cancel()
+            except Exception:
+                pass
+            self.task = None
 
         # 将开始标志放入队列
         asyncio.run_coroutine_threadsafe(

@@ -147,8 +147,13 @@ class TaskHandler:
                 if not self.drain_queue():
                     break
 
+                self.cleanup()
                 task = self.buffer.pop()
                 if task is None:
+                    continue
+
+                if task.socket_id not in self.sockets_id:
+                    logger.debug(f"跳过已断连客户端任务: {task.task_id[:8]}")
                     continue
 
                 # 根据任务类型分派

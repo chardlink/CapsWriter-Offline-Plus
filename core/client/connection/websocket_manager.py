@@ -91,6 +91,8 @@ class WebSocketManager:
                 subprotocols=["binary"],
                 max_size=None,
                 max_queue=None,  # 防止文件过大时，只发送，来不及消费结果，接收队列填满导致 pause_reading
+                ping_interval=20,
+                ping_timeout=20,
             )
 
             # websockets>=16.0 默认走代理，本地连接需显式禁用，但 14 才引入这个参数
@@ -117,7 +119,7 @@ class WebSocketManager:
     
     async def send(self, message: AudioMessage) -> bool:
         """
-        发送消息到服务端
+        发送消息到服务端（若长时待机后连接断开，自动尝试重连一次并重发）
         
         Args:
             message: 要发送的 AudioMessage 对象
@@ -126,19 +128,30 @@ class WebSocketManager:
             发送是否成功
         """
         if not self.is_connected:
-            logger.warning("无法发送消息：WebSocket 未连接")
-            return False
+            if not await self.connect():
+                logger.warning("无法发送消息：WebSocket 未连接且重连失败")
+                return False
         
+        payload = message.to_json()
         try:
-            await self.state.websocket.send(message.to_json())
+            await self.state.websocket.send(payload)
             return True
             
-        except (websockets.exceptions.ConnectionClosedError, websockets.exceptions.ConnectionClosedOK):
+        except (websockets.exceptions.ConnectionClosedError, websockets.exceptions.ConnectionClosedOK, OSError):
+            logger.info("发送时检测到 WebSocket 已断开，正在尝试自动重连...")
             self.state.websocket = None
-            raise CommunicationError("发送失败：连接已断开")
+            if await self.connect() and self.state.websocket is not None:
+                try:
+                    await self.state.websocket.send(payload)
+                    return True
+                except Exception as retry_err:
+                    logger.warning(f"重连后发送仍然失败: {retry_err}")
+                    self.state.websocket = None
+            return False
             
         except Exception as e:
-            raise CommunicationError(f"发送消息时发生未知错误: {e}")
+            logger.warning(f"发送消息时发生未知错误: {e}")
+            return False
     
     async def receive(self) -> Optional[RecognitionMessage]:
         """

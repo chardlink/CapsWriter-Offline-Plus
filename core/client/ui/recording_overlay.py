@@ -169,11 +169,13 @@ class _LayeredSurface:
             ctypes.byref(wintypes.SIZE(self.width, self.height)), self.mem_dc,
             ctypes.byref(wintypes.POINT(0, 0)), 0, ctypes.byref(blend), 2)
         if not ok:
-            # Tk 创建 overrideredirect 窗口时会先调用 SetLayeredWindowAttributes，
-            # Windows 要求先清除再重新设置 WS_EX_LAYERED 才能切换到 UpdateLayeredWindow。
+            # 长时间待机/锁屏/显示器休眠唤醒后，缓存的桌面 DC 或 WS_EX_LAYERED 可能失效，刷新后重试
+            if self.screen_dc:
+                user32.ReleaseDC(None, self.screen_dc)
+            self.screen_dc = user32.GetDC(None)
             ex = user32.GetWindowLongW(self.hwnd, -20)
             user32.SetWindowLongW(self.hwnd, -20, ex & ~0x80000)
-            user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000)
+            user32.SetWindowLongW(self.hwnd, -20, ex | 0x80000 | 0x20 | 0x08000000 | 0x80 | 0x8)
             user32.UpdateLayeredWindow(
                 self.hwnd, self.screen_dc, ctypes.byref(wintypes.POINT(int(x), int(y))),
                 ctypes.byref(wintypes.SIZE(self.width, self.height)), self.mem_dc,
@@ -456,10 +458,9 @@ class RecordingOverlay:
             pass
         self.pos_x = work.left + (work.right - work.left - self.win_w) // 2
         self.pos_y = work.bottom - self.win_h - int(56 * self.s)
-        if not self.visible:
-            self.visible = True
-            self._present(now)
-            user32.ShowWindow(self.hwnd, 4)               # SW_SHOWNOACTIVATE
+        self.visible = True
+        self._present(now)
+        user32.ShowWindow(self.hwnd, 4)               # SW_SHOWNOACTIVATE（即使之前 visible=True 也强制确保显示）
         user32.SetWindowPos(self.hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x53)  # 置顶
 
     def _begin_hide(self, now):
@@ -524,6 +525,7 @@ class RecordingOverlay:
                     self._level_in = 0.0
                     self._set_theme('processing', now)
                     self.placeholder = '正在识别…'
+                    self.hide_at = now + 15.0  # 兜底超时，防止服务端断连或丢任务时悬浮窗永久卡死在桌面上
                 elif kind == 'error':
                     self.phase = 'done'
                     self._set_theme('error', now)
@@ -534,11 +536,14 @@ class RecordingOverlay:
                 elif kind == 'text':
                     if self.phase in ('done', 'idle') or not value:
                         continue
+                    if self.phase == 'processing':
+                        self.hide_at = now + 15.0
                     self._set_target(self._merge(value))
                 elif kind == 'final':
                     self.phase = 'done'
                     self._set_theme('done', now)
                     if value:
+                        self.hide_at = 0.0
                         self._set_target(value)
                         # 最终结果与已显示差异较大时，直接补齐到只剩最后几个字待打出
                         jump = len(value) - 8
