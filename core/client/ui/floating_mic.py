@@ -73,6 +73,11 @@ TME_LEAVE = 0x00000002
 TIMER_PULSE = 1
 MONITOR_DEFAULTTONEAREST = 2
 
+VK_LBUTTON = 0x01
+VK_RBUTTON = 0x02
+VK_MBUTTON = 0x04
+VK_ESCAPE = 0x1B
+
 # ── 主题色板（与 TrayPanel / RecordingOverlay 保持一致）──────────
 BG_GLASS = (17, 21, 34)
 ACCENT_C1 = (56, 189, 248)     # 极光青 #38BDF8
@@ -213,6 +218,8 @@ user32.MonitorFromPoint.argtypes = [POINT, wintypes.DWORD]
 user32.MonitorFromPoint.restype = wintypes.HANDLE
 user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFO)]
 user32.GetMonitorInfoW.restype = wintypes.BOOL
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = wintypes.SHORT
 
 gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
 gdi32.CreateCompatibleDC.restype = wintypes.HDC
@@ -322,6 +329,7 @@ class FloatingMicButton:
         self._hover_menu = False
         self._pressed_main = False
         self._menu_open = False
+        self._menu_opened_at = 0.0
         self._tracking_leave = False
         self._last_recording_state = False
 
@@ -825,6 +833,28 @@ class FloatingMicButton:
         if msg == WM_TIMER and wparam == TIMER_PULSE:
             if not self._visible:
                 return 0
+            # 当右键“隐藏悬浮球”胶囊展开时，检测用户在屏幕其他任意空白处的鼠标点击或 Esc 键，自动收起胶囊
+            if self._menu_open and not self._lbutton_down and (time.perf_counter() - self._menu_opened_at) > 0.15:
+                l_down = (user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+                r_down = (user32.GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0
+                m_down = (user32.GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0
+                esc_down = (user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0
+                if esc_down:
+                    self._menu_open = False
+                    self._hover_menu = False
+                    self._present()
+                    return 0
+                if l_down or r_down or m_down:
+                    pt = POINT()
+                    user32.GetCursorPos(ctypes.byref(pt))
+                    lx = int(pt.x - self.win_x)
+                    ly = int(pt.y - self.win_y)
+                    # 只有左键点在“隐藏悬浮球”胶囊上才保留给 WM_LBUTTONDOWN 执行隐藏；其余任何空白点击（含左键/右键/中键）均立即收起该右键选项
+                    if not (l_down and self._hit_menu_pill(lx, ly)) and not self._hit_main_orb(lx, ly):
+                        self._menu_open = False
+                        self._hover_menu = False
+                        self._present()
+                        return 0
             rec = self._is_recording()
             if rec or rec != self._last_recording_state:
                 self._last_recording_state = rec
@@ -925,9 +955,15 @@ class FloatingMicButton:
         if msg == WM_RBUTTONUP:
             lx = ctypes.c_short(lparam & 0xFFFF).value
             ly = ctypes.c_short((lparam >> 16) & 0xFFFF).value
-            if self._hit_main_orb(lx, ly) or self._hit_menu_pill(lx, ly):
+            if self._hit_main_orb(lx, ly):
                 self._update_menu_side()
                 self._menu_open = not self._menu_open
+                if self._menu_open:
+                    self._menu_opened_at = time.perf_counter()
+                self._present()
+            elif self._menu_open:
+                self._menu_open = False
+                self._hover_menu = False
                 self._present()
             return 0
 
