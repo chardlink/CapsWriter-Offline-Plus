@@ -63,6 +63,7 @@ class ClientConfig:
     llm_stop_key = 'esc'        # 中断 LLM 输出的快捷键
 
     enable_tray = True          # 客户端默认启用托盘图标功能
+    floating_mic = False        # 是否在桌面显示可拖动的悬浮语音识别按钮（点击开始/再次点击停止）
 
     # 日志配置
     log_level = 'DEBUG'          # 日志级别：'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'

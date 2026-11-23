@@ -92,6 +92,7 @@ class CapsWriterClient:
         self.output = TextOutput()
         self.diary = DiaryWriter(base_path=self.base_dir)
         self.overlay = None
+        self.floating_mic = None
 
         # 初始化各管理器
         self.ws = WebSocketManager(self)
@@ -178,6 +179,8 @@ class CapsWriterClient:
         # 1. 停止核心运行组件
         self.udp.stop()
         self.shortcut.stop()
+        if self.floating_mic:
+            self.floating_mic.stop()
         if self.overlay:
             self.overlay.stop()
         self.stream.stop()

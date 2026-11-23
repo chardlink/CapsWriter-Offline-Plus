@@ -94,6 +94,7 @@ class TrayManager:
             ('📋 复制结果', self._copy_last_result),
             ('📁 日记与录音', diary_submenu),
             ('⏱️ 长按触发延时', threshold_menu),
+            ('🎙️ 桌面悬浮语音按钮', self._toggle_floating_mic_menu, lambda item: bool(getattr(Config, 'floating_mic', False))),
             ('📝 上下文', self._add_context),
             ('✨ 热词', self._add_hotword),
             ('🧹 清除记忆 (AI对话上下文)', self._clear_memory),
@@ -140,6 +141,8 @@ class TrayManager:
                 },
                 'get_threshold': lambda: getattr(Config, 'threshold', 0.3),
                 'set_threshold': self._set_threshold,
+                'get_floating_mic': lambda: bool(getattr(Config, 'floating_mic', False)),
+                'on_toggle_floating_mic': self._set_floating_mic,
             },
         }
         if server is not None:
@@ -196,7 +199,7 @@ class TrayManager:
         toast(message, duration=int(duration * 1000), bg=bg)
 
     def _persist_client_config(self, key: str, value_str: str) -> None:
-        """将数值型配置项持久化写回 config_client.py"""
+        """将数值型或布尔型配置项持久化写回 config_client.py"""
         try:
             cfg_path = os.path.join(self.app.base_dir, 'config_client.py')
             if not os.path.exists(cfg_path):
@@ -204,7 +207,7 @@ class TrayManager:
             with open(cfg_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             new_content, count = re.subn(
-                rf'(^\s*{re.escape(key)}\s*=\s*)[0-9.]+',
+                rf'(^\s*{re.escape(key)}\s*=\s*)(?:True|False|[0-9.]+)',
                 rf'\g<1>{value_str}',
                 content,
                 count=1,
@@ -215,6 +218,40 @@ class TrayManager:
                     f.write(new_content)
         except Exception as e:
             logger.warning(f"保存 {key} 到配置文件失败: {e}")
+
+    def _toggle_floating_mic_menu(self) -> None:
+        self._set_floating_mic(not bool(getattr(Config, 'floating_mic', False)))
+
+    def _set_floating_mic(self, enabled: bool = None) -> None:
+        """开启或隐藏桌面悬浮语音识别按钮，并双向同步 TrayPanel 开关与 config_client.py"""
+        if enabled is None:
+            new_val = not bool(getattr(Config, 'floating_mic', False))
+        else:
+            new_val = bool(enabled)
+
+        Config.floating_mic = new_val
+        self._persist_client_config('floating_mic', 'True' if new_val else 'False')
+
+        if getattr(self.app, 'floating_mic', None) is not None:
+            self.app.floating_mic.set_visible(new_val)
+
+        # 若 TrayPanel 当前打开，立即刷新其滑动开关状态
+        try:
+            panel = getattr(self._tray_instance, '_panel', None)
+            if panel is not None:
+                panel._sync_live_state()
+                panel._need_redraw = True
+                if getattr(panel, 'hwnd', None):
+                    panel._present(time.perf_counter())
+        except Exception:
+            pass
+
+        if new_val:
+            logger.info("已开启桌面悬浮语音按钮（点击开始/停止识别，支持自由拖动与右键隐藏）")
+            self._notify("已开启桌面悬浮语音按钮（点击即录，可拖动）")
+        else:
+            logger.info("已隐藏桌面悬浮语音按钮")
+            self._notify("已隐藏桌面悬浮语音按钮")
 
     def _set_threshold(self, seconds: float):
         """设置长按触发语音识别与弹框的延时（秒），立即生效并持久化写入 config_client.py"""

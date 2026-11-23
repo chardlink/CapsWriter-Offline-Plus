@@ -538,6 +538,10 @@ class TrayPanel:
         self._selected_threshold = self._read_threshold()
         self._editing_threshold = False
         self._threshold_input = ""
+        self._floating_mic_val = self._read_floating_mic()
+        self._fmic_pos = 1.0 if self._floating_mic_val else 0.0
+        self._fmic_from = self._fmic_pos
+        self._fmic_at = 0.0
         self._console_visible = self._read_console_visible()
 
         self._icon_cache: Dict[Tuple, Image.Image] = {}
@@ -604,6 +608,14 @@ class TrayPanel:
         except Exception:
             return 0.3
 
+    def _read_floating_mic(self) -> bool:
+        client_cfg = self.config.get('client') or {}
+        fn = client_cfg.get('get_floating_mic')
+        try:
+            return bool(fn()) if fn else False
+        except Exception:
+            return False
+
     def _sync_live_state(self) -> None:
         self._autostart_val = self._read_autostart()
         self._switch_pos = 1.0 if self._autostart_val else 0.0
@@ -613,6 +625,10 @@ class TrayPanel:
         self._selected_threshold = self._read_threshold()
         self._editing_threshold = False
         self._threshold_input = ""
+        self._floating_mic_val = self._read_floating_mic()
+        self._fmic_pos = 1.0 if self._floating_mic_val else 0.0
+        self._fmic_from = self._fmic_pos
+        self._fmic_at = 0.0
         self._console_visible = self._read_console_visible()
 
     def _commit_custom_threshold(self) -> None:
@@ -661,9 +677,9 @@ class TrayPanel:
         self.header_h = int(round(34 * s))
         self.tab_h = int(round(34 * s)) if self._has_tabs else 0
         if self._has_tabs:
-            self.content_h = int(round(296 * s))
+            self.content_h = int(round(342 * s))
         elif self._has_client:
-            self.content_h = int(round(296 * s))
+            self.content_h = int(round(342 * s))
         else:
             rows = len((self.config.get('server') or {}).get('actions', []))
             self.content_h = int(round(68 * s + 10 * s + rows * 42 * s + max(0, rows - 1) * 8 * s))
@@ -1010,6 +1026,14 @@ class TrayPanel:
             self._switch_at = 0.0
             self._need_redraw = True
 
+        if self._fmic_at and (now - self._fmic_at) < 0.18:
+            self._need_redraw = True
+            animating = True
+        elif self._fmic_at:
+            self._fmic_pos = 1.0 if self._floating_mic_val else 0.0
+            self._fmic_at = 0.0
+            self._need_redraw = True
+
         # 服务端忙碌脉冲动画
         if self._active_tab == 1 and self._has_server:
             get_st = (self.config.get('server') or {}).get('get_status')
@@ -1109,6 +1133,18 @@ class TrayPanel:
             if action:
                 threading.Thread(target=action, daemon=True).start()
             return
+
+        if hit_id == 'floating_mic':
+            self._fmic_from = self._current_fmic_pos(now)
+            self._floating_mic_val = not self._floating_mic_val
+            self._fmic_at = now
+            self._need_redraw = True
+            user32.SetTimer(self.hwnd, TIMER_ANIM, 16, None)
+            self._present(now)
+            if action:
+                val = self._floating_mic_val
+                threading.Thread(target=lambda: action(val), daemon=True).start()
+            return
         if hit_id.startswith('ret_'):
             days = int(hit_id[4:])
             self._selected_days = days
@@ -1147,6 +1183,13 @@ class TrayPanel:
             return target
         t = _ease_in_out((now - self._switch_at) / 0.16)
         return self._switch_from + (target - self._switch_from) * t
+
+    def _current_fmic_pos(self, now: float) -> float:
+        target = 1.0 if self._floating_mic_val else 0.0
+        if not self._fmic_at:
+            return target
+        t = _ease_in_out((now - self._fmic_at) / 0.16)
+        return self._fmic_from + (target - self._fmic_from) * t
 
     # ---- 渲染 ----
 
@@ -1188,7 +1231,7 @@ class TrayPanel:
 
         # 3. Content Area
         if self._active_tab == 0 and self._has_client:
-            self._render_client_tab(frame, d, x0, y, cw, hits)
+            self._render_client_tab(frame, d, x0, y, cw, now, hits)
         elif self._has_server:
             self._render_server_tab(frame, d, x0, y, cw, now, hits)
         y += self.content_h + int(round(10 * s))
@@ -1315,7 +1358,7 @@ class TrayPanel:
 
         return y + h
 
-    def _render_client_tab(self, frame: Image.Image, d: ImageDraw.Draw, x0: int, y: int, cw: int, hits: list) -> None:
+    def _render_client_tab(self, frame: Image.Image, d: ImageDraw.Draw, x0: int, y: int, cw: int, now: float, hits: list) -> None:
         s = self.s
         client_cfg = self.config.get('client') or {}
         actions = client_cfg.get('actions', [])
@@ -1482,6 +1525,56 @@ class TrayPanel:
                 tcol = TEXT_PRIMARY if hovered_c else TEXT_MUTED
                 d.text(((cx0 + cx1) // 2, t_pcy), '自定义秒数…', font=self.f_small, fill=tcol + (255,), anchor='mm')
             hits.append(('thr_custom', crect, None, False))
+
+        # 3. 桌面悬浮语音按钮开关卡片（点击即录 / 免按住键盘鼠标 / 右键可隐藏并联动）
+        fmy = ty0 + th + int(round(8 * s))
+        fmh = int(round(38 * s))
+        fm_rect = (x0, fmy, x0 + cw, fmy + fmh)
+        self._draw_tile(frame, 'floating_mic', fm_rect, 11 * s)
+        fm_cy = fmy + fmh // 2
+        fm_ico_sz = int(round(14 * s))
+        fm_hovered = self._hover_id == 'floating_mic'
+        fm_pos = self._current_fmic_pos(now)
+        frame.alpha_composite(
+            self._icon('mic', fm_ico_sz, ACCENT_C1 if fm_pos > 0.5 or fm_hovered else TEXT_SECONDARY),
+            (x0 + int(round(12 * s)), fm_cy - fm_ico_sz // 2),
+        )
+        tx_fm = x0 + int(round(12 * s)) + fm_ico_sz + int(round(7 * s))
+        d.text(
+            (tx_fm, fm_cy),
+            '桌面悬浮语音按钮',
+            font=self.f_btn,
+            fill=(TEXT_PRIMARY if (fm_hovered or fm_pos > 0.5) else TEXT_SECONDARY) + (255,),
+            anchor='lm',
+        )
+        d.text(
+            (tx_fm + int(round(104 * s)), fm_cy),
+            '点击即录 · 可拖动',
+            font=self.f_small,
+            fill=TEXT_MUTED + (255,),
+            anchor='lm',
+        )
+
+        sw_w = int(round(38 * s))
+        sw_h = int(round(20 * s))
+        sw_x = x0 + cw - sw_w - int(round(11 * s))
+        sw_y = fm_cy - sw_h // 2
+        if fm_pos <= 0.01:
+            fm_track = _draw_rr((sw_w, sw_h), sw_h / 2, fill=(255, 255, 255, 34), outline=(255, 255, 255, 48), width=1)
+        else:
+            c_left = _mix((71, 85, 105), ACCENT_C1, fm_pos)
+            c_right = _mix((71, 85, 105), ACCENT_C2, fm_pos)
+            fm_track = _draw_grad_pill(sw_w, sw_h, sw_h / 2, c_left, c_right, 255)
+        frame.alpha_composite(fm_track, (sw_x, sw_y))
+
+        knob_d = int(round(14 * s))
+        knob_margin = (sw_h - knob_d) // 2
+        kx = int(round(sw_x + knob_margin + fm_pos * (sw_w - 2 * knob_margin - knob_d)))
+        ky = sw_y + knob_margin
+        knob = Image.new('RGBA', (knob_d * 4, knob_d * 4), (0, 0, 0, 0))
+        ImageDraw.Draw(knob).ellipse((0, 0, knob_d * 4 - 1, knob_d * 4 - 1), fill=(255, 255, 255, 255))
+        frame.alpha_composite(knob.resize((knob_d, knob_d), Image.LANCZOS), (kx, ky))
+        hits.append(('floating_mic', fm_rect, client_cfg.get('on_toggle_floating_mic'), False))
 
     def _render_pill_row(
         self,

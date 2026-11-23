@@ -34,8 +34,15 @@ class MicRunner:
         # 2. UI 提示
         TipsDisplay.show_mic_tips()
 
-        # 3. 开启运行组件 (音频流、快捷键监听)
+        # 3. 开启运行组件 (音频流、快捷键监听、桌面悬浮语音按钮)
         self.app.overlay = RecordingOverlay()
+        from core.client.ui.floating_mic import FloatingMicButton
+        self.app.floating_mic = FloatingMicButton(
+            self.app,
+            on_user_hide=lambda: self.tray_manager._set_floating_mic(False),
+        )
+        if getattr(Config, 'floating_mic', False):
+            self.app.floating_mic.show()
         self.app.stream.start()
         self.app.shortcut.start()
         
